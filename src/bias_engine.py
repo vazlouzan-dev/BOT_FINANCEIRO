@@ -198,37 +198,37 @@ def _explain_bias(
     
     drivers = []
     
-    # Asia driver
+    # Fator Ásia
     if asia_bias == "BULLISH":
-        drivers.append(f"* Asia: Bullish close ({asia_conf:.0%}) - Positive momentum into London")
+        drivers.append(f"* Ásia: Fecho em alta ({asia_conf:.0%}) — momentum positivo para Londres")
     elif asia_bias == "BEARISH":
-        drivers.append(f"* Asia: Bearish close ({asia_conf:.0%}) - Weakness feeding into London")
+        drivers.append(f"* Ásia: Fecho em baixa ({asia_conf:.0%}) — fraqueza a alimentar Londres")
     else:
-        drivers.append(f"* Asia: Neutral consolidation ({asia_conf:.0%})")
-    
-    # London driver
+        drivers.append(f"* Ásia: Consolidação neutra ({asia_conf:.0%})")
+
+    # Fator Londres
     if london_bias == "BULLISH":
-        drivers.append(f"* London: Bullish move ({london_conf:.0%}) - Strength into NY open")
+        drivers.append(f"* Londres: Movimento em alta ({london_conf:.0%}) — força para abertura NY")
     elif london_bias == "BEARISH":
-        drivers.append(f"* London: Bearish pressure ({london_conf:.0%}) - Risk-off into NY")
+        drivers.append(f"* Londres: Pressão em baixa ({london_conf:.0%}) — risco na abertura NY")
     else:
-        drivers.append(f"* London: Neutral range ({london_conf:.0%})")
-    
-    # Macro driver
+        drivers.append(f"* Londres: Range neutro ({london_conf:.0%})")
+
+    # Fator Macro
     if macro_sentiment == "BULLISH":
-        drivers.append(f"* Macro: Dovish/Positive setup ({macro_conf:.0%}) - Economic optimism")
+        drivers.append(f"* Macro: Contexto positivo/dovish ({macro_conf:.0%}) — otimismo económico")
     elif macro_sentiment == "BEARISH":
-        drivers.append(f"* Macro: Hawkish/Negative setup ({macro_conf:.0%}) - Economic headwinds")
+        drivers.append(f"* Macro: Contexto negativo/hawkish ({macro_conf:.0%}) — ventos contrários")
     else:
-        drivers.append(f"* Macro: Neutral calendar ({macro_conf:.0%})")
-    
-    # Combined effect
+        drivers.append(f"* Macro: Calendário neutro ({macro_conf:.0%})")
+
+    # Conclusão
     if ny_signal == "BULLISH":
-        drivers.append("* Combined: Bullish bias for NY open")
+        drivers.append("* Conclusão: Tendência de alta para abertura NY")
     elif ny_signal == "BEARISH":
-        drivers.append("* Combined: Bearish bias for NY open")
+        drivers.append("* Conclusão: Tendência de baixa para abertura NY")
     else:
-        drivers.append("* Combined: Mixed signals - use caution for directional trades")
+        drivers.append("* Conclusão: Sinais mistos — cautela em trades direcionais")
     
     return drivers
 
