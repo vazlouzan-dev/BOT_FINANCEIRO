@@ -11,8 +11,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Generated output (reports and logs)
-output/
+# Generated output — ignore logs but keep the latest report
+output/logs/
+output/*.log
 
 # IDE / OS files
 .vscode/

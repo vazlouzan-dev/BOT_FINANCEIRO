@@ -1,26 +1,55 @@
-# Execute this entire command block in PowerShell (Run as Administrator)
-# Copy and paste everything from here to the end into PowerShell
+# Financial Market Bias Analyzer - Windows Task Scheduler Setup
+# Run this script as Administrator in PowerShell:
+#   Right-click PowerShell -> "Run as Administrator"
+#   Then: .\setup_task.ps1
 
-$taskName = 'FinancialMarketBiasAnalyzer'
-$pythonExe = 'C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro\.venv\Scripts\python.exe'
-$scriptPath = 'C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro\main.py'
-$projectPath = 'C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro'
+$taskName   = "FinancialMarketBiasAnalyzer"
+$pythonExe  = "C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro\.venv\Scripts\python.exe"
+$scriptPath = "C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro\main.py"
+$workingDir = "C:\Users\Utilizador\OneDrive\Área de Trabalho\Bot_Financeiro"
 
-# Create scheduling components
-$action = New-ScheduledTaskAction -Execute $pythonExe -Argument $scriptPath -WorkingDirectory $projectPath
-$trigger = New-ScheduledTaskTrigger -Daily -At 06:00AM
+# Run at 14:00 local time (Portugal), ~30 min before NY open (14:30 UTC / 09:30 ET)
+# Adjust the hour if your timezone differs from UTC+0/UTC+1
+$triggerTime = "14:00"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Financial Market Bias Analyzer"        -ForegroundColor Cyan
+Write-Host "  Task Scheduler Setup"                  -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Check admin privileges
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
+if (-not $isAdmin) {
+    Write-Host "ERROR: Run this script as Administrator." -ForegroundColor Red
+    exit 1
+}
+
+$action    = New-ScheduledTaskAction -Execute $pythonExe -Argument $scriptPath -WorkingDirectory $workingDir
+$trigger   = New-ScheduledTaskTrigger -Daily -At $triggerTime
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
-# Register the task
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Daily automated analysis of NY market bias at 06:00 AM EDT" -Force
+Register-ScheduledTask `
+    -TaskName   $taskName `
+    -Action     $action `
+    -Trigger    $trigger `
+    -Principal  $principal `
+    -Settings   $settings `
+    -Description "Daily NY market bias analysis — runs at $triggerTime (local time) before NY open" `
+    -Force | Out-Null
 
-Write-Host "`n========================================" -ForegroundColor Green
-Write-Host "SUCCESS: Task Created!" -ForegroundColor Green  
-Write-Host "========================================`n" -ForegroundColor Green
-Write-Host "Agendamento: Diariamente as 06:00 AM EDT" -ForegroundColor Cyan
-Write-Host "Resultado: output/bias_report.json`n" -ForegroundColor Cyan
-Write-Host "Para gerenciar:" -ForegroundColor Yellow
-Write-Host "1. Abra Task Scheduler (tasksched.msc)" -ForegroundColor White
-Write-Host "2. Procure: FinancialMarketBiasAnalyzer" -ForegroundColor White
-Write-Host "3. Right-click para Edit, Run, ou Delete`n" -ForegroundColor White
+Write-Host "SUCCESS: Task '$taskName' created!" -ForegroundColor Green
+Write-Host ""
+Write-Host "Schedule : Daily at $triggerTime (local time)"  -ForegroundColor White
+Write-Host "Output   : $workingDir\output\bias_report.json" -ForegroundColor White
+Write-Host ""
+Write-Host "To manage the task:"                                     -ForegroundColor Yellow
+Write-Host "  - Open Task Scheduler (tasksched.msc)"                -ForegroundColor White
+Write-Host "  - Find: $taskName"                                     -ForegroundColor White
+Write-Host "  - Right-click -> Run (to test), Edit, or Delete"      -ForegroundColor White
+Write-Host ""
+Write-Host "To run manually now:"                                    -ForegroundColor Yellow
+Write-Host "  python main.py"                                        -ForegroundColor White
+Write-Host ""

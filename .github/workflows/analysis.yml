@@ -1,0 +1,46 @@
+name: Market Bias Analysis
+
+on:
+  schedule:
+    # 13:00 UTC = ~09:00 AM ET, 30 min before NY open (weekdays only)
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run analysis
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: python main.py
+
+      - name: Upload bias report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bias-report-${{ github.run_number }}
+          path: output/bias_report.json
+          retention-days: 30
+
+      - name: Commit report back to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p output
+          git add -f output/bias_report.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "chore: auto bias report $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push || true
