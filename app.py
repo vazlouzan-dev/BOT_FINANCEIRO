@@ -436,6 +436,71 @@ with tab_dashboard:
 
     st.divider()
 
+    # ── Contexto Histórico ────────────────────────────────────────────────
+    hist = report.get("historical_context", {})
+    hist_available = hist.get("available", False)
+
+    with st.expander("📚 Contexto Histórico — Como o mercado reagiu no passado", expanded=hist_available):
+        if hist_available:
+            hb   = hist.get("overall_bias", "NEUTRAL")
+            hc   = hist.get("overall_conf", 0.0)
+            hn   = hist.get("total_samples", 0)
+            hcolor = SIGNAL_COLORS.get(hb, "#888")
+            hicon  = BIAS_ICONS.get(hb, "⚪")
+
+            hc1, hc2 = st.columns([2, 1])
+            with hc1:
+                st.markdown(
+                    f"Base histórica: <span style='color:{hcolor}; font-size:1.1rem; font-weight:700;'>"
+                    f"{hicon} {traduz_sinal(hb)}</span> &nbsp; "
+                    f"<span style='color:#aaa;'>({hc:.0%} conf | {hn} amostras)</span>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"Regime aplicado: {hist.get('regime','—')} | Últimos {5} anos de dados")
+            with hc2:
+                st.caption("Como interpretar: % das vezes em que o mercado subiu/desceu em condições similares")
+
+            per_event = hist.get("per_event", [])
+            if per_event:
+                EVENT_LABELS = {
+                    "NFP":     "Non-Farm Payrolls",
+                    "CPI":     "CPI",
+                    "PCE":     "Core PCE",
+                    "PMI":     "ISM PMI",
+                    "JOBLESS": "Jobless Claims",
+                    "GDP":     "GDP",
+                    "FOMC":    "FOMC",
+                }
+                rows = []
+                for ev in per_event:
+                    bull_pct = ev.get("bullish_pct", 0)
+                    bear_pct = ev.get("bearish_pct", 0)
+                    dom      = ev.get("dominant", "NEUTRAL")
+                    dom_icon = BIAS_ICONS.get(dom, "⚪")
+                    avg_ret  = ev.get("avg_spy_ret")
+                    rows.append({
+                        "Evento":       EVENT_LABELS.get(ev["event_key"], ev["event_key"]),
+                        "Dado":         ev.get("hot_label", "—").capitalize(),
+                        "N amostras":   ev.get("n_samples", 0),
+                        "Bullish %":    f"{bull_pct:.0%}",
+                        "Bearish %":    f"{bear_pct:.0%}",
+                        "Dominante":    f"{dom_icon} {traduz_sinal(dom)}",
+                        "SPY med. %":   f"{avg_ret:+.2f}%" if avg_ret is not None else "N/D",
+                        "Peso":         f"{ev.get('weight', 0):.0%}",
+                    })
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+        elif hist.get("db_has_data"):
+            st.info("Base de dados histórica existe mas sem eventos correspondentes às condições de hoje.")
+        else:
+            st.warning(
+                "Base de dados histórica não encontrada.  \n"
+                "Execute `python main.py --build-history` para construir o histórico de 5 anos "
+                "(requer FRED_API_KEY configurado no ficheiro `.env`). "
+                "Demora ~5-10 minutos na primeira vez; depois é actualizado semanalmente."
+            )
+
+    st.divider()
+
     # ── Fatores Determinantes ─────────────────────────────────────────────
     st.markdown("**🔍 Fatores Determinantes**")
     if key_drivers:

@@ -104,7 +104,15 @@ def main():
     print("\nStarting analysis...\n")
     
     # Run single analysis or continuous scheduling
-    if len(sys.argv) > 1 and sys.argv[1] == "--schedule":
+    if len(sys.argv) > 1 and sys.argv[1] == "--build-history":
+        # Build / refresh historical patterns database
+        force = "--force" in sys.argv
+        logger.info("Building historical patterns database...")
+        from src.historical_patterns import build_history
+        n = build_history(force=force)
+        print(f"\nHistorical database built: {n} events stored.")
+        print("Run 'python main.py' to use historical context in bias analysis.")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--schedule":
         # Continuous mode (--schedule flag)
         logger.info("Running in SCHEDULED mode (updates every 15 minutes)")
         schedule_updates()
@@ -112,12 +120,15 @@ def main():
         # Single run mode (default)
         logger.info("Running in SINGLE ANALYSIS mode")
         run_analysis()
-        
+
         print("\n" + "=" * 70)
         print("  ANALYSIS COMPLETE!")
         print("=" * 70)
         print("\nTo run continuos updates every 15 minutes:")
         print("  python main.py --schedule")
+        print("\nTo build historical patterns database (run once):")
+        print("  python main.py --build-history")
+        print("  python main.py --build-history --force   (force full rebuild)")
         print("\nTo schedule automatic runs (Windows):")
         print("  1. Open Task Scheduler")
         print("  2. Create Basic Task")

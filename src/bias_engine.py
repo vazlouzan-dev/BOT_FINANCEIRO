@@ -18,18 +18,26 @@ from src.market_analyzer import analyze_session_assets, calculate_session_bias
 from src.macro_calendar import fetch_macro_calendar, calculate_macro_sentiment
 from src.regime_detector import detect_market_regime
 from src.news_analyzer import fetch_all_news, calculate_news_sentiment
+from src.historical_patterns import get_historical_context, build_history, _db_needs_rebuild
 from src.utils import logger
 
 # ============================================================================
-# DYNAMIC WEIGHT TABLES (news impact drives the balance)
+# DYNAMIC WEIGHT TABLES
+# Axes: news impact level × history availability
+# History layer has fixed 15% when data is available (≥5 events),
+# else redistributed to macro + sessions.
 # ============================================================================
-# When no significant news → macro dominates, less volatility
-# When high-impact news   → news can override macro entirely
 _DYNAMIC_WEIGHTS = {
-    "high":   {"sessions": 0.20, "macro": 0.20, "news": 0.60},
-    "medium": {"sessions": 0.35, "macro": 0.30, "news": 0.35},
-    "low":    {"sessions": 0.40, "macro": 0.40, "news": 0.20},
-    "none":   {"sessions": 0.45, "macro": 0.50, "news": 0.05},
+    #                sessions  macro  news   history
+    "high_hist":   {"sessions": 0.15, "macro": 0.15, "news": 0.55, "history": 0.15},
+    "medium_hist": {"sessions": 0.25, "macro": 0.25, "news": 0.35, "history": 0.15},
+    "low_hist":    {"sessions": 0.30, "macro": 0.35, "news": 0.20, "history": 0.15},
+    "none_hist":   {"sessions": 0.35, "macro": 0.45, "news": 0.05, "history": 0.15},
+    # Without history data:
+    "high":        {"sessions": 0.20, "macro": 0.20, "news": 0.60, "history": 0.00},
+    "medium":      {"sessions": 0.35, "macro": 0.30, "news": 0.35, "history": 0.00},
+    "low":         {"sessions": 0.40, "macro": 0.40, "news": 0.20, "history": 0.00},
+    "none":        {"sessions": 0.45, "macro": 0.50, "news": 0.05, "history": 0.00},
 }
 
 # ============================================================================
@@ -141,21 +149,41 @@ def calculate_ny_bias() -> Dict:
     )
 
     # ========================================================================
-    # STEP 6 — DYNAMIC WEIGHTS + FINAL CALCULATION
+    # STEP 6 — HISTORICAL PATTERNS (base rates for current conditions)
+    # ========================================================================
+    logger.info(f"\n[HISTORY] Querying historical base rates (regime={regime})...")
+    upcoming_events = macro_calendar.get("upcoming_events", [])
+    hist_context    = get_historical_context(regime, upcoming_events)
+
+    report["historical_context"] = hist_context
+    if hist_context.get("available"):
+        logger.info(
+            f"Historical Bias: {hist_context['overall_bias']} "
+            f"({hist_context['overall_conf']:.0%}) | "
+            f"{hist_context['total_samples']} samples across "
+            f"{len(hist_context['per_event'])} events"
+        )
+    else:
+        logger.info("[HISTORY] No historical data available — run with --build-history first")
+
+    # ========================================================================
+    # STEP 7 — DYNAMIC WEIGHTS + FINAL CALCULATION
     # News impact level determines how much each layer contributes.
     # No news → macro dominates. High-impact news → news can override macro.
     # ========================================================================
     logger.info(f"\n[FINAL DECISION] Computing NY opening bias (9:30-10:30)...")
-    logger.info(f"  News impact: {news_impact} -> adjusting layer weights")
 
-    weights    = _DYNAMIC_WEIGHTS[news_impact]
-    w_sessions = weights["sessions"]
-    w_macro    = weights["macro"]
-    w_news     = weights["news"]
+    hist_available = hist_context.get("available", False)
+    weight_key     = f"{news_impact}_hist" if hist_available else news_impact
+    weights        = _DYNAMIC_WEIGHTS.get(weight_key, _DYNAMIC_WEIGHTS[news_impact])
+    w_sessions     = weights["sessions"]
+    w_macro        = weights["macro"]
+    w_news         = weights["news"]
+    w_history      = weights["history"]
 
     logger.info(
-        f"  Weights -> DXY/Sessions: {w_sessions:.0%} | "
-        f"Macro: {w_macro:.0%} | Noticias: {w_news:.0%}"
+        f"  Weights -> Sessions: {w_sessions:.0%} | Macro: {w_macro:.0%} | "
+        f"Noticias: {w_news:.0%} | Historico: {w_history:.0%}"
     )
 
     def _to_score(sentiment: str, confidence: float) -> float:
@@ -173,13 +201,18 @@ def calculate_ny_bias() -> Dict:
         _to_score(london_bias, london_confidence) * london_w
     )
 
-    macro_score = _to_score(macro_sentiment, macro_confidence)
-    news_score  = _to_score(news_bias, news_conf)
+    macro_score   = _to_score(macro_sentiment, macro_confidence)
+    news_score    = _to_score(news_bias, news_conf)
+    history_score = _to_score(
+        hist_context.get("overall_bias", "NEUTRAL"),
+        hist_context.get("overall_conf", 0.0),
+    ) if hist_available else 0.0
 
     ny_score = (
-        session_score * w_sessions +
-        macro_score   * w_macro +
-        news_score    * w_news
+        session_score  * w_sessions +
+        macro_score    * w_macro +
+        news_score     * w_news +
+        history_score  * w_history
     )
 
     if ny_score > NY_SCORE_THRESHOLD:
@@ -199,6 +232,7 @@ def calculate_ny_bias() -> Dict:
         london_bias, london_confidence,
         macro_sentiment, macro_confidence,
         news_bias, news_conf, news_impact,
+        hist_context,
         ny_signal, regime, volatility, weights,
     )
 
@@ -233,6 +267,7 @@ def _explain_bias(
     london_bias: str,  london_conf: float,
     macro_sentiment: str, macro_conf: float,
     news_bias: str,    news_conf: float, news_impact: str,
+    hist_context: Dict,
     ny_signal: str,
     regime: str = "neutral",
     volatility: str = "BAIXA",
@@ -302,6 +337,19 @@ def _explain_bias(
         drivers.append(f"* Noticias SPY/QQQ/Mag7: Sentimento negativo ({news_conf:.0%}) | {impact_str}")
     else:
         drivers.append(f"* Noticias SPY/QQQ/Mag7: Neutro ({news_conf:.0%}) | {impact_str}")
+
+    # Fator Historico
+    if hist_context.get("available"):
+        hb   = hist_context.get("overall_bias", "NEUTRAL")
+        hc   = hist_context.get("overall_conf", 0.0)
+        hn   = hist_context.get("total_samples", 0)
+        nevt = len(hist_context.get("per_event", []))
+        drivers.append(
+            f"* Historico ({nevt} eventos, {hn} amostras): "
+            f"{hb} ({hc:.0%}) — base rate em condicoes similares"
+        )
+    else:
+        drivers.append("* Historico: sem dados — corra --build-history para activar")
 
     # Conclusao
     if ny_signal == "BULLISH":
