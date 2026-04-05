@@ -14,6 +14,19 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv()
 
 # ============================================================================
+# REGIME DETECTION (automatic macro regime classification)
+# ============================================================================
+REGIME_SCORE_INFLATION  =  2   # score >= this → "inflation_fight"
+REGIME_SCORE_RECESSION  = -2   # score <= this → "recession_fear"
+
+# Human-readable labels
+REGIME_LABELS = {
+    "inflation_fight": "Combate à Inflação",
+    "recession_fear":  "Receio de Recessão",
+    "neutral":         "Neutro",
+}
+
+# ============================================================================
 # ASSETS TO MONITOR (9 assets across stocks, forex, commodities, crypto, bonds)
 # ============================================================================
 ASSETS = {

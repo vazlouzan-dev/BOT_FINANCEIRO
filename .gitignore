@@ -14,6 +14,10 @@ __pycache__/
 # Generated output — ignore logs but keep the latest report
 output/logs/
 output/*.log
+output/evaluations.db
+
+# Claude Code internal files
+.claude/
 
 # IDE / OS files
 .vscode/

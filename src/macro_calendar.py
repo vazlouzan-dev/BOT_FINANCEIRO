@@ -356,15 +356,120 @@ def fetch_macro_calendar() -> Dict:
 
 
 # ============================================================================
-# SENTIMENT CALCULATION
+# REGIME-AWARE MACRO INTERPRETATION
 # ============================================================================
 
-def calculate_macro_sentiment(calendar: Dict, weights: Dict[str, float]) -> Tuple[str, float]:
-    """
-    Calculate macro bias from upcoming events using weighted scoring.
+# How to interpret "hot" (forecast > previous) data per event type and regime.
+# +1 = BULLISH for stocks, -1 = BEARISH for stocks
+_REGIME_INTERPRETATION = {
+    # NFP / Nonfarm Payrolls
+    "NFP": {
+        "inflation_fight": {"hot": -1, "cool": +1},  # hot = more hikes → bearish
+        "recession_fear":  {"hot": +1, "cool": -1},  # hot = economy ok → bullish
+        "neutral":         {"hot": +1, "cool": -1},
+    },
+    # CPI / Inflation
+    "CPI": {
+        "inflation_fight": {"hot": -1, "cool": +1},
+        "recession_fear":  {"hot": -1, "cool": +1},  # still bad either way
+        "neutral":         {"hot": -1, "cool": +1},
+    },
+    # PCE
+    "PCE": {
+        "inflation_fight": {"hot": -1, "cool": +1},
+        "recession_fear":  {"hot": -1, "cool": +1},
+        "neutral":         {"hot": -1, "cool": +1},
+    },
+    # PMI / ISM
+    "PMI": {
+        "inflation_fight": {"hot": -1, "cool": +1},  # hot PMI = more inflation pressure
+        "recession_fear":  {"hot": +1, "cool": -1},  # hot PMI = economy not crashing
+        "neutral":         {"hot": +1, "cool": -1},
+    },
+    # Jobless Claims (inverted: MORE claims = labour weakness)
+    "JOBLESS": {
+        "inflation_fight": {"hot": +1, "cool": -1},  # more claims = softer labour → bullish (less hikes)
+        "recession_fear":  {"hot": -1, "cool": +1},  # more claims = recession worsening
+        "neutral":         {"hot": -1, "cool": +1},
+    },
+    # Default for unknown events
+    "OTHER": {
+        "inflation_fight": {"hot": -1, "cool": +1},
+        "recession_fear":  {"hot": +1, "cool": -1},
+        "neutral":         {"hot": +1, "cool": -1},
+    },
+}
 
-    For each event: signal = +1 if forecast > previous (bullish), -1 otherwise.
-    Final score is a weighted average of signals.
+
+def _classify_event(event_name: str) -> str:
+    """Map event name to an interpretation category."""
+    name = event_name.lower()
+    if any(k in name for k in ("payroll", "nfp", "nonfarm")):
+        return "NFP"
+    if "cpi" in name:
+        return "CPI"
+    if "pce" in name:
+        return "PCE"
+    if any(k in name for k in ("pmi", "ism")):
+        return "PMI"
+    if any(k in name for k in ("jobless", "claims", "unemployment")):
+        return "JOBLESS"
+    return "OTHER"
+
+
+def _parse_numeric(value) -> Optional[float]:
+    """Parse forecast/previous string to float, or return None."""
+    if value in (None, "N/A", "N/D", ""):
+        return None
+    try:
+        cleaned = (str(value)
+                   .replace(',', '').replace('%', '')
+                   .replace('k', '000').replace('K', '000')
+                   .strip())
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return None
+
+
+def _event_is_hot(event_name: str, forecast, previous) -> Optional[bool]:
+    """
+    Returns True if data is 'hot' (better/higher than expected in growth terms),
+    False if 'cool', None if cannot determine.
+    For jobless claims, HIGHER = worse (so hot means MORE claims).
+    """
+    f_val = _parse_numeric(forecast)
+    p_val = _parse_numeric(previous)
+    if f_val is None or p_val is None:
+        return None
+    category = _classify_event(event_name)
+    # Jobless claims: higher = worse labour market = "hot" in the sense of "bad"
+    # For consistency the interpretation table already handles the direction correctly.
+    return f_val > p_val
+
+
+# ============================================================================
+# SENTIMENT CALCULATION (regime-aware)
+# ============================================================================
+
+def calculate_macro_sentiment(
+    calendar: Dict,
+    weights: Dict[str, float],
+    regime: str = "neutral",
+) -> Tuple[str, float]:
+    """
+    Calculate macro bias from upcoming events using regime-aware weighted scoring.
+
+    Args:
+        calendar: Output of fetch_macro_calendar()
+        weights:  MACRO_EVENT_WEIGHTS from config
+        regime:   Current market regime ("inflation_fight", "recession_fear", "neutral")
+
+    For each event:
+      - Determines if the data is "hot" (forecast > previous) or "cool"
+      - Applies the regime-specific directional signal from _REGIME_INTERPRETATION
+      - Weights the signal by the event's importance
+
+    Returns: (sentiment, confidence)
     """
     sentiment_score = 0.0
     total_weight = 0.0
@@ -376,37 +481,46 @@ def calculate_macro_sentiment(calendar: Dict, weights: Dict[str, float]) -> Tupl
 
     for event in upcoming_events:
         event_name = event.get("event", "")
-        forecast = event.get("forecast", "N/A")
-        previous = event.get("previous", "N/A")
+        forecast   = event.get("forecast", "N/A")
+        previous   = event.get("previous", "N/A")
+        actual     = event.get("actual", "N/A")
 
-        signal = 0.0
-        try:
-            if forecast not in ("N/A", None) and previous not in ("N/A", None):
-                f_val = float(str(forecast).replace(',', '').replace('%', '')
-                              .replace('k', '000').replace('K', '000').strip())
-                p_val = float(str(previous).replace(',', '').replace('%', '')
-                              .replace('k', '000').replace('K', '000').strip())
-                signal = 1.0 if f_val > p_val else -1.0
-        except (ValueError, TypeError):
-            signal = 0.0
+        # Prefer actual over forecast when available
+        compare_val = actual if actual not in ("N/A", "N/D", None, "") else forecast
 
-        event_weight = 0.0
+        is_hot = _event_is_hot(event_name, compare_val, previous)
+        if is_hot is None:
+            continue   # cannot interpret this event
+
+        category = _classify_event(event_name)
+        regime_key = regime if regime in ("inflation_fight", "recession_fear") else "neutral"
+        interp = _REGIME_INTERPRETATION.get(category, _REGIME_INTERPRETATION["OTHER"])
+        direction = interp[regime_key]["hot" if is_hot else "cool"]
+
+        # Event weight
         name_lower = event_name.lower()
-        if "payroll" in name_lower or "nfp" in name_lower or "nonfarm" in name_lower:
+        if any(k in name_lower for k in ("payroll", "nfp", "nonfarm")):
             event_weight = weights.get("NFP", 0.45)
         elif "cpi" in name_lower:
             event_weight = weights.get("CPI", 0.20)
         elif "pce" in name_lower:
             event_weight = weights.get("PCE", 0.10)
-        elif "pmi" in name_lower or "ism" in name_lower:
+        elif any(k in name_lower for k in ("pmi", "ism")):
             event_weight = weights.get("PMI", 0.10)
-        elif "jobless" in name_lower or "claims" in name_lower:
+        elif any(k in name_lower for k in ("jobless", "claims")):
             event_weight = weights.get("jobless_claims", 0.08)
         else:
             event_weight = weights.get("other", 0.07)
 
-        sentiment_score += signal * event_weight
+        sentiment_score += direction * event_weight
         total_weight += event_weight
+
+        hot_str = "quente" if is_hot else "frio"
+        logger.debug(
+            f"  [{category}] {event_name[:40]} → {hot_str} → "
+            f"{'BULLISH' if direction > 0 else 'BEARISH'} "
+            f"(regime={regime_key}, weight={event_weight})"
+        )
 
     if total_weight > 0:
         sentiment_score = sentiment_score / total_weight

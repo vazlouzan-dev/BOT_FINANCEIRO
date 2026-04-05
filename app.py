@@ -12,6 +12,12 @@ import subprocess
 from datetime import datetime
 import pytz
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from src.evaluator import (
+    get_all_evaluations, get_pending_evaluations,
+    set_actual_result, calculate_accuracy_stats, delete_evaluation,
+)
+
 # ── Configuração da página ────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Analisador de Tendência NY",
@@ -78,7 +84,7 @@ def load_report():
 
 
 def run_analysis():
-    """Executa o main.py e recarrega o relatório."""
+    """Executa o main.py, guarda a previsão na BD de avaliação e recarrega."""
     with st.spinner("A correr análise... pode demorar ~30 segundos"):
         result = subprocess.run(
             [sys.executable, os.path.join(os.path.dirname(__file__), "main.py")],
@@ -87,6 +93,14 @@ def run_analysis():
             cwd=os.path.dirname(__file__),
         )
     if result.returncode == 0:
+        # Auto-save prediction to evaluations DB
+        try:
+            report = load_report()
+            if report:
+                from src.evaluator import save_prediction
+                save_prediction(report)
+        except Exception:
+            pass   # non-critical
         st.success("Análise concluída! A atualizar...")
         st.rerun()
     else:
@@ -143,162 +157,356 @@ with col_btn:
     if st.button("🔄 Correr Análise", use_container_width=True, type="primary"):
         run_analysis()
 
-st.divider()
+tab_dashboard, tab_avaliacao = st.tabs(["📊 Dashboard", "🎯 Avaliação"])
 
 # ── Carregar relatório ────────────────────────────────────────────────────────
 report = load_report()
 
-if report is None:
-    st.info("Sem relatório disponível. Clique em **Correr Análise** para gerar um.")
-    st.stop()
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — DASHBOARD
+# ════════════════════════════════════════════════════════════════════════════
+with tab_dashboard:
+    if report is None:
+        st.info("Sem relatório disponível. Clique em **Correr Análise** para gerar um.")
+        st.stop()
 
-# ── Extrair dados ─────────────────────────────────────────────────────────────
-ny_bias     = report.get("ny_bias", {})
-asia        = report.get("asia_session", {})
-london      = report.get("london_session", {})
-macro       = report.get("macro_sentiment", {})
-signal      = ny_bias.get("signal", "NEUTRAL")
-confidence  = ny_bias.get("confidence", 0.0)
-is_valid    = ny_bias.get("is_valid_signal", False)
-key_drivers = ny_bias.get("key_drivers", [])
-ts_raw      = report.get("timestamp", "")
+    # ── Extrair dados ─────────────────────────────────────────────────────
+    ny_bias     = report.get("ny_bias", {})
+    asia        = report.get("asia_session", {})
+    london      = report.get("london_session", {})
+    macro       = report.get("macro_sentiment", {})
+    regime_data = report.get("market_regime", {})
+    signal      = ny_bias.get("signal", "NEUTRAL")
+    confidence  = ny_bias.get("confidence", 0.0)
+    is_valid    = ny_bias.get("is_valid_signal", False)
+    key_drivers = ny_bias.get("key_drivers", [])
+    ts_raw      = report.get("timestamp", "")
 
-try:
-    ts = datetime.fromisoformat(ts_raw).strftime("%Y-%m-%d %H:%M UTC")
-except Exception:
-    ts = ts_raw
+    try:
+        ts = datetime.fromisoformat(ts_raw).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        ts = ts_raw
 
-color = SIGNAL_COLORS.get(signal, "#888")
-icon  = SIGNAL_ICONS.get(signal, "●")
-label = traduz_sinal(signal)
+    color = SIGNAL_COLORS.get(signal, "#888")
+    icon  = SIGNAL_ICONS.get(signal, "●")
+    label = traduz_sinal(signal)
 
-# ── Cartão principal ──────────────────────────────────────────────────────────
-c1, c2, c3 = st.columns([2, 1.5, 1.5])
+    # ── Regime badge ──────────────────────────────────────────────────────
+    REGIME_COLORS = {
+        "inflation_fight": "#FF8C00",
+        "recession_fear":  "#FF4B4B",
+        "neutral":         "#888888",
+    }
+    REGIME_ICONS = {
+        "inflation_fight": "🔥",
+        "recession_fear":  "📉",
+        "neutral":         "⚖️",
+    }
+    regime_key   = regime_data.get("regime", "neutral")
+    regime_label = {"inflation_fight": "Combate à Inflação",
+                    "recession_fear":  "Receio de Recessão",
+                    "neutral":         "Neutro"}.get(regime_key, regime_key)
+    regime_score = regime_data.get("score", 0)
+    regime_color = REGIME_COLORS.get(regime_key, "#888")
+    regime_icon  = REGIME_ICONS.get(regime_key, "⚖️")
 
-with c1:
-    st.markdown(f"""
-    <div class="signal-card" style="background:{color}18; border:2px solid {color}55;">
-        <div class="signal-label">TENDÊNCIA ABERTURA NY</div>
-        <div class="signal-value" style="color:{color};">{icon} {label}</div>
-        <div class="conf-label">Última atualização: {ts}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with c2:
-    st.metric("Confiança", fmt_conf(confidence))
-    st.progress(min(confidence, 1.0))
-    validade = "✅ Sinal Válido" if is_valid else "⚠️ Abaixo do limiar (85%)"
-    st.caption(validade)
-
-with c3:
-    weighted  = ny_bias.get("weighted_score", 0.0)
-    direcao   = "Alta" if weighted > 0 else "Baixa" if weighted < 0 else "Neutro"
-    st.metric("Score Ponderado", f"{weighted:+.3f}", delta=direcao,
-              delta_color="normal" if weighted > 0 else "inverse" if weighted < 0 else "off")
-    fontes = macro.get("data_sources", [])
-    if fontes:
-        st.caption("Fontes: " + " · ".join(fontes))
-
-st.divider()
-
-# ── Sessões e Macro ───────────────────────────────────────────────────────────
-col_asia, col_london, col_macro = st.columns(3)
-
-
-def render_sessao(col, titulo, session_data):
-    bias        = session_data.get("overall_bias", "N/A")
-    conf        = session_data.get("confidence", 0.0)
-    pattern     = session_data.get("dominant_pattern", "N/A")
-    assets      = session_data.get("assets", {})
-    bias_color  = SIGNAL_COLORS.get(bias, "#888")
-    bias_icon   = BIAS_ICONS.get(bias, "⚪")
-    bias_label  = traduz_sinal(bias)
-
-    with col:
-        st.markdown(f"**{titulo}**")
-        st.markdown(
-            f"<span style='color:{bias_color}; font-size:1.3rem; font-weight:700;'>"
-            f"{bias_icon} {bias_label}</span> &nbsp; "
-            f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(conf)} de confiança</span>",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"Padrão dominante: {traduz_padrao(pattern)}")
-
-        if assets:
-            rows = []
-            for key, info in assets.items():
-                b      = info.get("bias", "N/A")
-                p      = info.get("pattern", "N/A")
-                c      = info.get("confidence", 0.0)
-                close  = info.get("last_close", None)
-                name   = info.get("name", key)
-                b_icon = BIAS_ICONS.get(b, "⚪")
-                rows.append({
-                    "Ativo":      name,
-                    "Tendência":  f"{b_icon} {traduz_sinal(b)}",
-                    "Padrão":     traduz_padrao(p),
-                    "Conf.":      fmt_conf(c),
-                    "Fecho":      f"{close:.2f}" if close else "N/D",
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Sem dados de ativos disponíveis.")
-
-
-render_sessao(col_asia,   "🌏 Sessão Ásia",     asia)
-render_sessao(col_london, "🇬🇧 Sessão Londres",  london)
-
-# Coluna Macro
-with col_macro:
-    macro_sinal = macro.get("sentiment", "N/A")
-    macro_conf  = macro.get("confidence", 0.0)
-    macro_color = SIGNAL_COLORS.get(macro_sinal, "#888")
-    macro_icon  = BIAS_ICONS.get(macro_sinal, "⚪")
-    macro_label = traduz_sinal(macro_sinal)
-    upcoming    = macro.get("upcoming_events", [])
-
-    st.markdown("**📰 Eventos Macroeconómicos**")
     st.markdown(
-        f"<span style='color:{macro_color}; font-size:1.3rem; font-weight:700;'>"
-        f"{macro_icon} {macro_label}</span> &nbsp; "
-        f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(macro_conf)} de confiança</span>",
+        f"<div style='margin-bottom:8px;'>"
+        f"<span style='background:{regime_color}22; border:1px solid {regime_color}66; "
+        f"color:{regime_color}; border-radius:6px; padding:4px 12px; font-size:0.9rem; font-weight:600;'>"
+        f"{regime_icon} Regime: {regime_label} &nbsp;|&nbsp; Score: {regime_score:+d}"
+        f"</span></div>",
         unsafe_allow_html=True,
     )
 
-    if upcoming:
-        for ev in upcoming[:8]:
-            impact_en  = ev.get("impact", "")
-            impact_pt  = traduz_impacto(impact_en)
-            tag_class  = {"Alto": "tag-alto", "Médio": "tag-medio"}.get(impact_pt, "tag-baixo")
-            fc         = ev.get("forecast", "N/D")
-            prev       = ev.get("previous", "N/D")
-            fc_str     = f"Prev: {fc} / Ant: {prev}" if fc not in ("N/A", "N/D") else ""
+    # ── Cartão principal ──────────────────────────────────────────────────
+    c1, c2, c3 = st.columns([2, 1.5, 1.5])
+
+    with c1:
+        st.markdown(f"""
+        <div class="signal-card" style="background:{color}18; border:2px solid {color}55;">
+            <div class="signal-label">TENDÊNCIA ABERTURA NY (9:30–10:30)</div>
+            <div class="signal-value" style="color:{color};">{icon} {label}</div>
+            <div class="conf-label">Última atualização: {ts}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        st.metric("Confiança", fmt_conf(confidence))
+        st.progress(min(confidence, 1.0))
+        validade = "✅ Sinal Válido" if is_valid else "⚠️ Abaixo do limiar (85%)"
+        st.caption(validade)
+
+    with c3:
+        weighted  = ny_bias.get("weighted_score", 0.0)
+        direcao   = "Alta" if weighted > 0 else "Baixa" if weighted < 0 else "Neutro"
+        st.metric("Score Ponderado", f"{weighted:+.3f}", delta=direcao,
+                  delta_color="normal" if weighted > 0 else "inverse" if weighted < 0 else "off")
+        fontes = macro.get("data_sources", [])
+        if fontes:
+            st.caption("Fontes: " + " · ".join(fontes))
+
+    st.divider()
+
+    # ── Regime — indicadores detalhados ───────────────────────────────────
+    with st.expander(f"{regime_icon} Detalhe do Regime de Mercado — {regime_label}", expanded=False):
+        indicators = regime_data.get("indicators", {})
+        scores     = regime_data.get("scores", {})
+        desc       = regime_data.get("description", "")
+        if desc:
+            st.caption(desc)
+        ind_rows = [
+            {"Indicador": "Curva de Yields (10Y-2Y)", "Valor": f"{indicators.get('yield_curve_spread'):+.2f}pp" if indicators.get('yield_curve_spread') is not None else "N/D", "Pontos": scores.get("yield_curve", 0), "Nota": "Invertida = recessão"},
+            {"Indicador": "VIX",                      "Valor": f"{indicators.get('vix'):.1f}"               if indicators.get('vix') is not None else "N/D",                   "Pontos": scores.get("vix", 0),         "Nota": ">20 = medo elevado"},
+            {"Indicador": "Core PCE (YoY %)",         "Valor": f"{indicators.get('pce_yoy'):.2f}%"          if indicators.get('pce_yoy') is not None else "N/D",               "Pontos": scores.get("pce", 0),         "Nota": "Objectivo Fed = 2% ★"},
+            {"Indicador": "CPI (YoY %)",              "Valor": f"{indicators.get('cpi_yoy'):.1f}%"          if indicators.get('cpi_yoy') is not None else "N/D",               "Pontos": scores.get("cpi", 0),         "Nota": "Inflação ao consumidor"},
+            {"Indicador": "Taxa Fed Funds",            "Valor": f"{indicators.get('fed_rate'):.2f}%"         if indicators.get('fed_rate') is not None else "N/D",               "Pontos": scores.get("fed_rate", 0),    "Nota": ">4% = restritivo"},
+            {"Indicador": "Desemprego (Δ 3m)",         "Valor": f"{indicators.get('unemployment_delta'):+.2f}pp" if indicators.get('unemployment_delta') is not None else "N/D","Pontos": scores.get("unemployment", 0),"Nota": "Δ>0.5pp = alarme"},
+            {"Indicador": "PMI",                       "Valor": f"{indicators.get('pmi'):.1f}"               if indicators.get('pmi') is not None else "N/D",                   "Pontos": scores.get("pmi", 0),         "Nota": "<50 = contracção"},
+        ]
+        st.dataframe(ind_rows, use_container_width=True, hide_index=True)
+        st.caption(f"Score total: {regime_score:+d}  |  ≥+2 = Combate Inflação  |  ≤-2 = Receio Recessão  |  ★ = indicador preferido da Fed")
+
+    # ── Sessões e Macro ───────────────────────────────────────────────────
+    col_asia, col_london, col_macro = st.columns(3)
+
+    def render_sessao(col, titulo, session_data):
+        bias        = session_data.get("overall_bias", "N/A")
+        conf        = session_data.get("confidence", 0.0)
+        pattern     = session_data.get("dominant_pattern", "N/A")
+        assets      = session_data.get("assets", {})
+        bias_color  = SIGNAL_COLORS.get(bias, "#888")
+        bias_icon   = BIAS_ICONS.get(bias, "⚪")
+        bias_label  = traduz_sinal(bias)
+
+        with col:
+            st.markdown(f"**{titulo}**")
             st.markdown(
-                f"<div class='driver-line'>"
-                f"<span class='{tag_class}'>{impact_pt}</span> "
-                f"<b>{ev.get('event','')[:38]}</b><br>"
-                f"<span style='color:#888; font-size:0.8rem;'>"
-                f"{ev.get('date','')}&nbsp;&nbsp;{fc_str}</span>"
-                f"</div>",
+                f"<span style='color:{bias_color}; font-size:1.3rem; font-weight:700;'>"
+                f"{bias_icon} {bias_label}</span> &nbsp; "
+                f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(conf)} de confiança</span>",
                 unsafe_allow_html=True,
             )
+            st.caption(f"Padrão dominante: {traduz_padrao(pattern)}")
+
+            if assets:
+                rows = []
+                for key, info in assets.items():
+                    b      = info.get("bias", "N/A")
+                    p      = info.get("pattern", "N/A")
+                    c      = info.get("confidence", 0.0)
+                    close  = info.get("last_close", None)
+                    name   = info.get("name", key)
+                    b_icon = BIAS_ICONS.get(b, "⚪")
+                    rows.append({
+                        "Ativo":     name,
+                        "Tendência": f"{b_icon} {traduz_sinal(b)}",
+                        "Padrão":    traduz_padrao(p),
+                        "Conf.":     fmt_conf(c),
+                        "Fecho":     f"{close:.2f}" if close else "N/D",
+                    })
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("Sem dados de ativos disponíveis.")
+
+    render_sessao(col_asia,   "🌏 Sessão Ásia",    asia)
+    render_sessao(col_london, "🇬🇧 Sessão Londres", london)
+
+    # Coluna Macro
+    with col_macro:
+        macro_sinal = macro.get("sentiment", "N/A")
+        macro_conf  = macro.get("confidence", 0.0)
+        macro_color = SIGNAL_COLORS.get(macro_sinal, "#888")
+        macro_icon  = BIAS_ICONS.get(macro_sinal, "⚪")
+        macro_label = traduz_sinal(macro_sinal)
+        upcoming    = macro.get("upcoming_events", [])
+        regime_applied = macro.get("regime_applied", "neutral")
+
+        st.markdown("**📰 Eventos Macroeconómicos**")
+        st.markdown(
+            f"<span style='color:{macro_color}; font-size:1.3rem; font-weight:700;'>"
+            f"{macro_icon} {macro_label}</span> &nbsp; "
+            f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(macro_conf)} de confiança</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"Interpretados com regime: {regime_applied}")
+
+        if upcoming:
+            for ev in upcoming[:8]:
+                impact_en  = ev.get("impact", "")
+                impact_pt  = traduz_impacto(impact_en)
+                tag_class  = {"Alto": "tag-alto", "Médio": "tag-medio"}.get(impact_pt, "tag-baixo")
+                fc         = ev.get("forecast", "N/D")
+                prev       = ev.get("previous", "N/D")
+                actual_v   = ev.get("actual", "")
+                fc_str     = f"Prev: {fc} / Ant: {prev}" if fc not in ("N/A", "N/D") else ""
+                actual_str = f" | Real: <b>{actual_v}</b>" if actual_v not in ("N/A", "N/D", None, "") else ""
+                st.markdown(
+                    f"<div class='driver-line'>"
+                    f"<span class='{tag_class}'>{impact_pt}</span> "
+                    f"<b>{ev.get('event','')[:38]}</b><br>"
+                    f"<span style='color:#888; font-size:0.8rem;'>"
+                    f"{ev.get('date','')}&nbsp;&nbsp;{fc_str}{actual_str}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("Sem eventos próximos disponíveis.")
+
+    st.divider()
+
+    # ── Fatores Determinantes ─────────────────────────────────────────────
+    st.markdown("**🔍 Fatores Determinantes**")
+    if key_drivers:
+        for driver in key_drivers:
+            clean = driver.lstrip("* ").strip()
+            st.markdown(f"- {clean}")
     else:
-        st.caption("Sem eventos próximos disponíveis.")
+        st.caption("Sem fatores disponíveis.")
 
-st.divider()
+    # ── Rodapé ────────────────────────────────────────────────────────────
+    st.divider()
+    st.caption(
+        "Dados: yfinance (OHLC) · FRED API (histórico) · ForexFactory JSON (calendário macro) | "
+        "Os sinais são meramente informativos — não constituem aconselhamento financeiro."
+    )
 
-# ── Fatores Determinantes ─────────────────────────────────────────────────────
-st.markdown("**🔍 Fatores Determinantes**")
-if key_drivers:
-    for driver in key_drivers:
-        clean = driver.lstrip("* ").strip()
-        st.markdown(f"- {clean}")
-else:
-    st.caption("Sem fatores disponíveis.")
 
-# ── Rodapé ────────────────────────────────────────────────────────────────────
-st.divider()
-st.caption(
-    "Dados: yfinance (OHLC) · FRED API (histórico) · ForexFactory JSON (calendário macro) | "
-    "Os sinais são meramente informativos — não constituem aconselhamento financeiro."
-)
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — AVALIAÇÃO
+# ════════════════════════════════════════════════════════════════════════════
+with tab_avaliacao:
+    st.markdown("### 🎯 Avaliação de Previsões")
+    st.caption(
+        "Regista o resultado real do mercado após cada sessão para medir a taxa de acerto do bot."
+    )
+
+    # ── Estatísticas de Precisão ──────────────────────────────────────────
+    stats = calculate_accuracy_stats()
+    total_eval = stats.get("total_evaluated", 0)
+
+    if total_eval > 0:
+        acc = stats.get("accuracy", 0.0)
+        acc_color = "#00C805" if acc >= 0.6 else "#FFA500" if acc >= 0.4 else "#FF4B4B"
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Total Avaliadas", total_eval)
+        s2.metric("Corretas", stats.get("correct", 0))
+        s3.metric("Taxa de Acerto", f"{acc:.0%}")
+        valid_stats = stats.get("valid_signals_only", {})
+        v_acc = valid_stats.get("accuracy", 0.0)
+        v_total = valid_stats.get("total", 0)
+        s4.metric("Acerto Sinais Válidos", f"{v_acc:.0%}", delta=f"{v_total} registos")
+
+        # By regime
+        by_regime = stats.get("by_regime", {})
+        if by_regime:
+            st.markdown("**Por Regime:**")
+            regime_rows = []
+            regime_names = {
+                "inflation_fight": "🔥 Combate à Inflação",
+                "recession_fear":  "📉 Receio de Recessão",
+                "neutral":         "⚖️ Neutro",
+            }
+            for reg, data in by_regime.items():
+                regime_rows.append({
+                    "Regime":        regime_names.get(reg, reg),
+                    "Avaliadas":     data["total"],
+                    "Corretas":      data["correct"],
+                    "Taxa de Acerto": f"{data['accuracy']:.0%}",
+                })
+            st.dataframe(regime_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("Ainda sem avaliações registadas. Preenche os resultados reais na tabela abaixo.")
+
+    st.divider()
+
+    # ── Previsões pendentes de avaliação ─────────────────────────────────
+    pending = get_pending_evaluations()
+    if pending:
+        st.markdown(f"**⏳ Pendentes de avaliação ({len(pending)})**")
+        for row in pending:
+            events_list = []
+            try:
+                events_list = json.loads(row.get("key_events") or "[]")
+            except Exception:
+                pass
+            events_str = ", ".join(events_list[:3]) if events_list else "—"
+
+            pred_signal = row["predicted_bias"]
+            pred_color  = SIGNAL_COLORS.get(pred_signal, "#888")
+            pred_icon   = BIAS_ICONS.get(pred_signal, "⚪")
+
+            with st.container(border=True):
+                col_info, col_form = st.columns([2, 1])
+                with col_info:
+                    st.markdown(
+                        f"**{row['session_date']}** &nbsp;|&nbsp; "
+                        f"<span style='color:{pred_color}; font-weight:700;'>"
+                        f"{pred_icon} {traduz_sinal(pred_signal)}</span> &nbsp;"
+                        f"({row['predicted_conf']*100:.0f}% conf.)",
+                        unsafe_allow_html=True,
+                    )
+                    regime_p = row.get("regime") or "neutral"
+                    st.caption(
+                        f"Regime: {regime_p.replace('_', ' ').title()} &nbsp;|&nbsp; "
+                        f"Eventos: {events_str}"
+                    )
+                with col_form:
+                    result_key = f"result_{row['id']}"
+                    notes_key  = f"notes_{row['id']}"
+                    actual_sel = st.selectbox(
+                        "Resultado real",
+                        options=["—", "BULLISH", "BEARISH", "NEUTRAL"],
+                        key=result_key,
+                        label_visibility="collapsed",
+                    )
+                    notes_inp = st.text_input(
+                        "Notas (opcional)",
+                        key=notes_key,
+                        placeholder="ex: reversão após notícia...",
+                        label_visibility="collapsed",
+                    )
+                    if st.button("💾 Guardar", key=f"save_{row['id']}", use_container_width=True):
+                        if actual_sel == "—":
+                            st.warning("Selecciona um resultado antes de guardar.")
+                        else:
+                            set_actual_result(row["id"], actual_sel, notes_inp)
+                            st.success("Guardado!")
+                            st.rerun()
+    else:
+        st.success("Todas as previsões estão avaliadas.")
+
+    st.divider()
+
+    # ── Histórico completo ────────────────────────────────────────────────
+    with st.expander("📋 Histórico Completo", expanded=False):
+        all_evals = get_all_evaluations(limit=100)
+        if all_evals:
+            table_rows = []
+            for row in all_evals:
+                pred   = row["predicted_bias"]
+                actual = row.get("actual_result") or "—"
+                match  = "✅" if pred == actual else ("❌" if actual != "—" else "⏳")
+                table_rows.append({
+                    "Data":        row["session_date"],
+                    "Previsão":    f"{BIAS_ICONS.get(pred,'⚪')} {traduz_sinal(pred)}",
+                    "Conf.":       f"{row['predicted_conf']*100:.0f}%",
+                    "Regime":      (row.get("regime") or "—").replace("_", " "),
+                    "Real":        f"{BIAS_ICONS.get(actual,'⚪')} {traduz_sinal(actual)}" if actual != "—" else "—",
+                    "Resultado":   match,
+                    "Notas":       row.get("notes") or "",
+                })
+            st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+            # Delete row
+            with st.form("delete_form"):
+                del_id = st.number_input("ID a apagar", min_value=1, step=1)
+                if st.form_submit_button("🗑️ Apagar registo"):
+                    if delete_evaluation(int(del_id)):
+                        st.success(f"Registo #{del_id} apagado.")
+                        st.rerun()
+                    else:
+                        st.error(f"Registo #{del_id} não encontrado.")
+        else:
+            st.caption("Sem histórico disponível.")
