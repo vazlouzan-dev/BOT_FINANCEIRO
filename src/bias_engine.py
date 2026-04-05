@@ -17,7 +17,20 @@ from src.config import SESSION_WEIGHTS, CONFIDENCE_THRESHOLD, MACRO_EVENT_WEIGHT
 from src.market_analyzer import analyze_session_assets, calculate_session_bias
 from src.macro_calendar import fetch_macro_calendar, calculate_macro_sentiment
 from src.regime_detector import detect_market_regime
+from src.news_analyzer import fetch_all_news, calculate_news_sentiment
 from src.utils import logger
+
+# ============================================================================
+# DYNAMIC WEIGHT TABLES (news impact drives the balance)
+# ============================================================================
+# When no significant news → macro dominates, less volatility
+# When high-impact news   → news can override macro entirely
+_DYNAMIC_WEIGHTS = {
+    "high":   {"sessions": 0.20, "macro": 0.20, "news": 0.60},
+    "medium": {"sessions": 0.35, "macro": 0.30, "news": 0.35},
+    "low":    {"sessions": 0.40, "macro": 0.40, "news": 0.20},
+    "none":   {"sessions": 0.45, "macro": 0.50, "news": 0.05},
+}
 
 # ============================================================================
 # BIAS CALCULATION ENGINE
@@ -111,76 +124,104 @@ def calculate_ny_bias() -> Dict:
     logger.info(f"Macro Sentiment: {macro_sentiment} ({macro_confidence:.0%} confidence)")
 
     # ========================================================================
-    # STEP 5 — FINAL NY BIAS CALCULATION (Weighted Average)
+    # STEP 5 — NEWS ANALYSIS (SPY/QQQ + Magnificent 7, regime-aware)
     # ========================================================================
-    logger.info("\n[FINAL DECISION] Computing NY opening bias (9:30–10:30)...")
-    
-    # Convert BULLISH/BEARISH/NEUTRAL to numeric score (-1, 0, +1)
-    def sentiment_to_score(sentiment: str, confidence: float) -> float:
-        """Convert sentiment + confidence to numeric score"""
+    logger.info(f"\n[NEWS] Fetching headlines for SPY, QQQ + Magnificent 7...")
+    news_items  = fetch_all_news()
+    news_result = calculate_news_sentiment(news_items, regime=regime)
+    news_bias   = news_result["bias"]
+    news_conf   = news_result["confidence"]
+    news_impact = news_result["impact_level"]
+    volatility  = news_result["volatility_flag"]
+
+    report["news_sentiment"] = news_result
+    logger.info(
+        f"News Bias: {news_bias} ({news_conf:.0%} conf) | "
+        f"Impact: {news_impact} | Volatilidade: {volatility}"
+    )
+
+    # ========================================================================
+    # STEP 6 — DYNAMIC WEIGHTS + FINAL CALCULATION
+    # News impact level determines how much each layer contributes.
+    # No news → macro dominates. High-impact news → news can override macro.
+    # ========================================================================
+    logger.info(f"\n[FINAL DECISION] Computing NY opening bias (9:30-10:30)...")
+    logger.info(f"  News impact: {news_impact} -> adjusting layer weights")
+
+    weights    = _DYNAMIC_WEIGHTS[news_impact]
+    w_sessions = weights["sessions"]
+    w_macro    = weights["macro"]
+    w_news     = weights["news"]
+
+    logger.info(
+        f"  Weights -> DXY/Sessions: {w_sessions:.0%} | "
+        f"Macro: {w_macro:.0%} | Noticias: {w_news:.0%}"
+    )
+
+    def _to_score(sentiment: str, confidence: float) -> float:
         if sentiment == "BULLISH":
             return confidence
         elif sentiment == "BEARISH":
             return -confidence
-        else:
-            return 0.0
-    
-    asia_score = sentiment_to_score(asia_bias, asia_confidence)
-    london_score = sentiment_to_score(london_bias, london_confidence)
-    macro_score = sentiment_to_score(macro_sentiment, macro_confidence)
-    
-    # Weighted average
-    asia_weight = SESSION_WEIGHTS["asia"]
-    london_weight = SESSION_WEIGHTS["london"]
-    macro_weight = SESSION_WEIGHTS["macro"]
-    
-    ny_score = (
-        asia_score * asia_weight +
-        london_score * london_weight +
-        macro_score * macro_weight
+        return 0.0
+
+    # Sessions layer: Asia + London weighted internally (30/40 split)
+    asia_w   = SESSION_WEIGHTS["asia"]   / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
+    london_w = SESSION_WEIGHTS["london"] / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
+    session_score = (
+        _to_score(asia_bias, asia_confidence)    * asia_w +
+        _to_score(london_bias, london_confidence) * london_w
     )
-    
-    # Convert score back to signal + confidence
+
+    macro_score = _to_score(macro_sentiment, macro_confidence)
+    news_score  = _to_score(news_bias, news_conf)
+
+    ny_score = (
+        session_score * w_sessions +
+        macro_score   * w_macro +
+        news_score    * w_news
+    )
+
     if ny_score > NY_SCORE_THRESHOLD:
-        ny_signal = "BULLISH"
+        ny_signal     = "BULLISH"
         ny_confidence = min(abs(ny_score), 1.0)
     elif ny_score < -NY_SCORE_THRESHOLD:
-        ny_signal = "BEARISH"
+        ny_signal     = "BEARISH"
         ny_confidence = min(abs(ny_score), 1.0)
     else:
-        ny_signal = "NEUTRAL"
+        ny_signal     = "NEUTRAL"
         ny_confidence = 0.5
-    
-    # Determine validity (>= 85% confidence)
+
     is_valid = ny_confidence >= CONFIDENCE_THRESHOLD
-    
-    # Key drivers explanation
+
     key_drivers = _explain_bias(
         asia_bias, asia_confidence,
         london_bias, london_confidence,
         macro_sentiment, macro_confidence,
-        ny_signal,
-        regime,
+        news_bias, news_conf, news_impact,
+        ny_signal, regime, volatility, weights,
     )
-    
+
     report["ny_bias"] = {
-        "signal": ny_signal,
-        "confidence": ny_confidence,
-        "weighted_score": ny_score,
-        "is_valid_signal": is_valid,
+        "signal":               ny_signal,
+        "confidence":           ny_confidence,
+        "weighted_score":       round(ny_score, 4),
+        "is_valid_signal":      is_valid,
         "confidence_threshold": CONFIDENCE_THRESHOLD,
-        "key_drivers": key_drivers,
+        "volatility_expected":  volatility,
+        "weights_used":         weights,
+        "key_drivers":          key_drivers,
     }
-    
+
     logger.info(f"\n{'*' * 60}")
     logger.info(f"NY OPENING BIAS: {ny_signal}")
     logger.info(f"Confidence: {ny_confidence:.1%}")
+    logger.info(f"Volatilidade esperada: {volatility}")
     logger.info(f"Valid Signal: {'YES' if is_valid else 'NO'} (threshold: {CONFIDENCE_THRESHOLD:.0%})")
     logger.info(f"{'*' * 60}\n")
-    
     for driver in key_drivers:
         logger.info(f"  | {driver}")
-    
+
     return report
 
 # ============================================================================
@@ -188,62 +229,87 @@ def calculate_ny_bias() -> Dict:
 # ============================================================================
 
 def _explain_bias(
-    asia_bias: str, asia_conf: float,
-    london_bias: str, london_conf: float,
+    asia_bias: str,    asia_conf: float,
+    london_bias: str,  london_conf: float,
     macro_sentiment: str, macro_conf: float,
+    news_bias: str,    news_conf: float, news_impact: str,
     ny_signal: str,
     regime: str = "neutral",
+    volatility: str = "BAIXA",
+    weights: Dict = None,
 ) -> List[str]:
-    """
-    Generate human-readable explanation of bias decision
-    """
-    
+    """Generate human-readable explanation of the bias decision."""
     from src.config import REGIME_LABELS
+    if weights is None:
+        weights = {"sessions": 0.40, "macro": 0.45, "news": 0.15}
+
     drivers = []
 
-    # Regime activo
+    # Regime + volatilidade
     regime_label = REGIME_LABELS.get(regime, regime)
     drivers.append(f"* Regime de mercado: {regime_label}")
+    drivers.append(f"* Volatilidade esperada: {volatility}")
 
-    # Fator Ásia
+    # Pesos dinâmicos usados
+    drivers.append(
+        f"* Pesos: DXY/Sessoes {weights['sessions']:.0%} | "
+        f"Macro {weights['macro']:.0%} | Noticias {weights['news']:.0%}"
+    )
+
+    # Fator Ásia (DXY/Global)
     if asia_bias == "BULLISH":
-        drivers.append(f"* Ásia: Fecho em alta ({asia_conf:.0%}) — momentum positivo para Londres")
+        drivers.append(f"* Asia (DXY/Global): Fecho em alta ({asia_conf:.0%}) — momentum positivo")
     elif asia_bias == "BEARISH":
-        drivers.append(f"* Ásia: Fecho em baixa ({asia_conf:.0%}) — fraqueza a alimentar Londres")
+        drivers.append(f"* Asia (DXY/Global): Fecho em baixa ({asia_conf:.0%}) — fraqueza global")
     else:
-        drivers.append(f"* Ásia: Consolidação neutra ({asia_conf:.0%})")
+        drivers.append(f"* Asia (DXY/Global): Consolidacao neutra ({asia_conf:.0%})")
 
-    # Fator Londres
+    # Fator Londres (DXY/Forex)
     if london_bias == "BULLISH":
-        drivers.append(f"* Londres: Movimento em alta ({london_conf:.0%}) — força para abertura NY")
+        drivers.append(f"* Londres (Forex/DXY): Alta ({london_conf:.0%}) — forca para abertura NY")
     elif london_bias == "BEARISH":
-        drivers.append(f"* Londres: Pressão em baixa ({london_conf:.0%}) — risco na abertura NY")
+        drivers.append(f"* Londres (Forex/DXY): Baixa ({london_conf:.0%}) — risco na abertura NY")
     else:
-        drivers.append(f"* Londres: Range neutro ({london_conf:.0%})")
+        drivers.append(f"* Londres (Forex/DXY): Range neutro ({london_conf:.0%})")
 
     # Fator Macro (regime-contextualizado)
     if macro_sentiment == "BULLISH":
         if regime == "inflation_fight":
-            drivers.append(f"* Macro: Dados fracos/dovish ({macro_conf:.0%}) — pressão sobre Fed alivia")
+            drivers.append(f"* Macro: Dados fracos/dovish ({macro_conf:.0%}) — pressao sobre Fed alivia")
         else:
             drivers.append(f"* Macro: Dados fortes ({macro_conf:.0%}) — economia resiliente")
     elif macro_sentiment == "BEARISH":
         if regime == "inflation_fight":
             drivers.append(f"* Macro: Dados quentes ({macro_conf:.0%}) — Fed pode apertar mais")
         elif regime == "recession_fear":
-            drivers.append(f"* Macro: Dados fracos ({macro_conf:.0%}) — recessão a ganhar força")
+            drivers.append(f"* Macro: Dados fracos ({macro_conf:.0%}) — recessao a ganhar forca")
         else:
-            drivers.append(f"* Macro: Contexto negativo ({macro_conf:.0%}) — ventos contrários")
+            drivers.append(f"* Macro: Contexto negativo ({macro_conf:.0%}) — ventos contrarios")
     else:
-        drivers.append(f"* Macro: Calendário neutro ({macro_conf:.0%})")
+        drivers.append(f"* Macro: Calendario neutro ({macro_conf:.0%})")
 
-    # Conclusão
-    if ny_signal == "BULLISH":
-        drivers.append("* Conclusão: Tendência de alta para abertura NY (9:30–10:30)")
-    elif ny_signal == "BEARISH":
-        drivers.append("* Conclusão: Tendência de baixa para abertura NY (9:30–10:30)")
+    # Fator Noticias (SPY/QQQ + Mag7)
+    impact_labels = {
+        "high":   "ALTO IMPACTO — noticias dominam o sinal",
+        "medium": "impacto medio",
+        "low":    "impacto reduzido",
+        "none":   "sem noticias relevantes — menos volatilidade",
+    }
+    impact_str = impact_labels.get(news_impact, news_impact)
+    if news_bias == "BULLISH":
+        drivers.append(f"* Noticias SPY/QQQ/Mag7: Sentimento positivo ({news_conf:.0%}) | {impact_str}")
+    elif news_bias == "BEARISH":
+        drivers.append(f"* Noticias SPY/QQQ/Mag7: Sentimento negativo ({news_conf:.0%}) | {impact_str}")
     else:
-        drivers.append("* Conclusão: Sinais mistos — cautela em trades direcionais na abertura")
+        drivers.append(f"* Noticias SPY/QQQ/Mag7: Neutro ({news_conf:.0%}) | {impact_str}")
+
+    # Conclusao
+    if ny_signal == "BULLISH":
+        drivers.append("* Conclusao: Tendencia de alta para abertura NY (9:30-10:30)")
+    elif ny_signal == "BEARISH":
+        drivers.append("* Conclusao: Tendencia de baixa para abertura NY (9:30-10:30)")
+    else:
+        drivers.append("* Conclusao: Sinais mistos — cautela em trades direcionais na abertura")
 
     return drivers
 

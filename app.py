@@ -175,11 +175,14 @@ with tab_dashboard:
     asia        = report.get("asia_session", {})
     london      = report.get("london_session", {})
     macro       = report.get("macro_sentiment", {})
+    news        = report.get("news_sentiment", {})
     regime_data = report.get("market_regime", {})
     signal      = ny_bias.get("signal", "NEUTRAL")
     confidence  = ny_bias.get("confidence", 0.0)
     is_valid    = ny_bias.get("is_valid_signal", False)
     key_drivers = ny_bias.get("key_drivers", [])
+    volatility  = ny_bias.get("volatility_expected", "—")
+    weights_used = ny_bias.get("weights_used", {})
     ts_raw      = report.get("timestamp", "")
 
     try:
@@ -238,13 +241,23 @@ with tab_dashboard:
         st.caption(validade)
 
     with c3:
-        weighted  = ny_bias.get("weighted_score", 0.0)
-        direcao   = "Alta" if weighted > 0 else "Baixa" if weighted < 0 else "Neutro"
+        weighted = ny_bias.get("weighted_score", 0.0)
+        direcao  = "Alta" if weighted > 0 else "Baixa" if weighted < 0 else "Neutro"
         st.metric("Score Ponderado", f"{weighted:+.3f}", delta=direcao,
                   delta_color="normal" if weighted > 0 else "inverse" if weighted < 0 else "off")
-        fontes = macro.get("data_sources", [])
-        if fontes:
-            st.caption("Fontes: " + " · ".join(fontes))
+        VOL_COLORS = {"ALTA": "#FF4B4B", "MÉDIA": "#FFA500", "BAIXA": "#00C805", "MUITO BAIXA": "#888"}
+        vol_color = VOL_COLORS.get(volatility, "#888")
+        st.markdown(
+            f"<span style='font-size:0.85rem;'>Volatilidade esperada: "
+            f"<b style='color:{vol_color};'>{volatility}</b></span>",
+            unsafe_allow_html=True,
+        )
+        if weights_used:
+            st.caption(
+                f"Pesos: Sessões {weights_used.get('sessions',0):.0%} · "
+                f"Macro {weights_used.get('macro',0):.0%} · "
+                f"Notícias {weights_used.get('news',0):.0%}"
+            )
 
     st.divider()
 
@@ -352,6 +365,74 @@ with tab_dashboard:
                 )
         else:
             st.caption("Sem eventos próximos disponíveis.")
+
+    st.divider()
+
+    # ── Notícias SPY / QQQ / Magnificent 7 ───────────────────────────────
+    news_bias_val  = news.get("bias", "NEUTRAL")
+    news_conf_val  = news.get("confidence", 0.0)
+    news_impact    = news.get("impact_level", "none")
+    scored_items   = news.get("scored_items", [])
+    total_hl       = news.get("total_headlines", 0)
+    classified_hl  = news.get("classified_count", 0)
+    hi_count       = news.get("high_impact_count", 0)
+
+    news_color = SIGNAL_COLORS.get(news_bias_val, "#888")
+    news_icon  = BIAS_ICONS.get(news_bias_val, "⚪")
+    IMPACT_COLORS = {"high": "#FF4B4B", "medium": "#FFA500", "low": "#888", "none": "#555"}
+    impact_color = IMPACT_COLORS.get(news_impact, "#555")
+    IMPACT_PT_MAP = {"high": "Alto", "medium": "Médio", "low": "Baixo", "none": "Sem notícias relevantes"}
+
+    st.markdown("**📰 Notícias — SPY / QQQ / Magnificent 7**")
+    nc1, nc2, nc3 = st.columns([2, 1, 1])
+    with nc1:
+        st.markdown(
+            f"<span style='color:{news_color}; font-size:1.2rem; font-weight:700;'>"
+            f"{news_icon} {traduz_sinal(news_bias_val)}</span> &nbsp; "
+            f"<span style='color:#aaa; font-size:0.85rem;'>{fmt_conf(news_conf_val)} confiança</span>",
+            unsafe_allow_html=True,
+        )
+    with nc2:
+        st.markdown(
+            f"Impacto: <b style='color:{impact_color};'>{IMPACT_PT_MAP.get(news_impact,'—')}</b>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{total_hl} headlines · {classified_hl} classificadas · {hi_count} alto impacto")
+    with nc3:
+        vol_color2 = VOL_COLORS.get(volatility, "#888")
+        st.markdown(
+            f"Volatilidade: <b style='color:{vol_color2};'>{volatility}</b>",
+            unsafe_allow_html=True,
+        )
+
+    CATEGORY_PT = {
+        "tariff":            "🚧 Tarifas/Comércio",
+        "fed_dovish":        "🕊️ Fed Dovish",
+        "fed_hawkish":       "🦅 Fed Hawkish",
+        "geopolitical":      "⚔️ Geopolítica",
+        "corporate_positive":"📈 Corporativo +",
+        "corporate_negative":"📉 Corporativo -",
+        "political":         "🏛️ Política",
+    }
+    SIGNAL_BADGE = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "🟡"}
+
+    if scored_items:
+        with st.expander(f"Ver headlines classificadas ({len(scored_items)})", expanded=news_impact == "high"):
+            for item in scored_items[:15]:
+                cat_label = CATEGORY_PT.get(item.get("category",""), item.get("category",""))
+                sig_badge = SIGNAL_BADGE.get(item.get("signal","NEUTRAL"), "🟡")
+                hi_badge  = " ⚡" if item.get("high_impact") else ""
+                st.markdown(
+                    f"{sig_badge}{hi_badge} **{item['title'][:80]}**  \n"
+                    f"<span style='color:#888; font-size:0.78rem;'>"
+                    f"{cat_label} · {item.get('ticker','')} · {item.get('publisher','')} · "
+                    f"{item.get('published_at','')}</span>",
+                    unsafe_allow_html=True,
+                )
+    elif total_hl == 0:
+        st.caption("Sem headlines disponíveis nas últimas 48h — volatilidade reduzida esperada.")
+    else:
+        st.caption(f"{total_hl} headlines encontradas mas nenhuma classificada como relevante.")
 
     st.divider()
 
