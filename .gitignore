@@ -11,10 +11,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Generated output — ignore logs but keep the latest report
-output/logs/
-output/*.log
-output/evaluations.db
+# Generated output — ignore entirely
+output/
 
 # Claude Code internal files
 .claude/
