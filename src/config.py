@@ -112,9 +112,9 @@ MARKET_HOURS = {
 # BIAS CALCULATION WEIGHTS (Session influence on NY open)
 # ============================================================================
 SESSION_WEIGHTS = {
-    "asia": 0.30,      # Asian close = 30% weight
-    "london": 0.40,    # London close = 40% weight
-    "macro": 0.30,     # Macro events = 30% weight
+    "asia": 0.05,      # Asian close = 5% weight
+    "london": 0.25,    # London close = 25% weight
+    "macro": 0.70,     # Macro events = 70% weight
 }
 
 # ============================================================================

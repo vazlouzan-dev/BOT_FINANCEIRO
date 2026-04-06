@@ -29,15 +29,17 @@ from src.utils import logger
 # ============================================================================
 _DYNAMIC_WEIGHTS = {
     #                sessions  macro  news   history
-    "high_hist":   {"sessions": 0.15, "macro": 0.15, "news": 0.55, "history": 0.15},
-    "medium_hist": {"sessions": 0.25, "macro": 0.25, "news": 0.35, "history": 0.15},
-    "low_hist":    {"sessions": 0.30, "macro": 0.35, "news": 0.20, "history": 0.15},
-    "none_hist":   {"sessions": 0.35, "macro": 0.45, "news": 0.05, "history": 0.15},
+    # Sessions = Ásia (5%) + Londres (25%) = 30% fixo
+    # Macro domina — sobe para 65-70% quando não há notícias relevantes
+    "high_hist":   {"sessions": 0.16, "macro": 0.29, "news": 0.45, "history": 0.10},
+    "medium_hist": {"sessions": 0.21, "macro": 0.39, "news": 0.30, "history": 0.10},
+    "low_hist":    {"sessions": 0.24, "macro": 0.51, "news": 0.15, "history": 0.10},
+    "none_hist":   {"sessions": 0.27, "macro": 0.58, "news": 0.05, "history": 0.10},
     # Without history data:
-    "high":        {"sessions": 0.20, "macro": 0.20, "news": 0.60, "history": 0.00},
-    "medium":      {"sessions": 0.35, "macro": 0.30, "news": 0.35, "history": 0.00},
-    "low":         {"sessions": 0.40, "macro": 0.40, "news": 0.20, "history": 0.00},
-    "none":        {"sessions": 0.45, "macro": 0.50, "news": 0.05, "history": 0.00},
+    "high":        {"sessions": 0.18, "macro": 0.32, "news": 0.50, "history": 0.00},
+    "medium":      {"sessions": 0.24, "macro": 0.46, "news": 0.30, "history": 0.00},
+    "low":         {"sessions": 0.27, "macro": 0.58, "news": 0.15, "history": 0.00},
+    "none":        {"sessions": 0.30, "macro": 0.65, "news": 0.05, "history": 0.00},
 }
 
 # ============================================================================
