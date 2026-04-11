@@ -436,6 +436,96 @@ with tab_dashboard:
 
     st.divider()
 
+    # ── PO3/ADM + Modo Sem Macro ──────────────────────────────────────────
+    po3         = report.get("po3_structure", {})
+    no_macro    = report.get("has_macro_today", True) is False
+    has_macro   = report.get("has_macro_today", True)
+
+    if po3:
+        po3_bias    = po3.get("bias", "NEUTRAL")
+        po3_conf    = po3.get("confidence", 0.0)
+        po3_phase   = po3.get("phase", "—")
+        po3_ticker  = po3.get("ticker_used", "ES=F")
+        po3_color   = SIGNAL_COLORS.get(po3_bias, "#888")
+        po3_icon    = BIAS_ICONS.get(po3_bias, "⚪")
+
+        mode_badge = (
+            "<span style='background:#ff4b4b22; border:1px solid #ff4b4b66; color:#ff4b4b; "
+            "border-radius:6px; padding:3px 10px; font-size:0.82rem; font-weight:600;'>⚠️ COM MACRO HOJE — modo normal</span>"
+            if has_macro else
+            "<span style='background:#00c80522; border:1px solid #00c80566; color:#00c805; "
+            "border-radius:6px; padding:3px 10px; font-size:0.82rem; font-weight:600;'>📊 SEM MACRO — PO3/ADM + Notícias</span>"
+        )
+        st.markdown(mode_badge, unsafe_allow_html=True)
+
+        with st.expander(f"🕯️ Estrutura PO3/ADM — Candle em Formação [{po3_ticker}]", expanded=no_macro):
+            p1, p2, p3 = st.columns([2, 1.5, 1.5])
+            with p1:
+                st.markdown(
+                    f"<span style='color:{po3_color}; font-size:1.2rem; font-weight:700;'>"
+                    f"{po3_icon} {traduz_sinal(po3_bias)}</span> &nbsp; "
+                    f"<span style='color:#aaa; font-size:0.85rem;'>{fmt_conf(po3_conf)} confiança</span>",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"Fase: **{po3_phase}**")
+            with p2:
+                st.caption("**Fases PO3:**")
+                st.caption("🔵 Acumulação → Ásia consolida")
+                st.caption("🟠 Manipulação → Londres varre stops")
+            with p3:
+                st.caption("🟢 Distribuição → direção real NY")
+                if no_macro:
+                    w_used = ny_bias.get("weights_used", {})
+                    st.caption(
+                        f"Pesos ativos: PO3 {w_used.get('candle', 0):.0%} · "
+                        f"Notícias {w_used.get('news', 0):.0%}"
+                    )
+
+    st.divider()
+
+    # ── Tabela de Ativos por Classe ───────────────────────────────────────
+    from src.config import ASSET_GROUPS
+
+    all_assets_data = report.get("all_assets", {})
+
+    if all_assets_data:
+        st.markdown("**📊 Ativos por Classe**")
+
+        GROUP_ORDER = ["indices", "forex", "crypto", "bonds"]
+
+        for group_key in GROUP_ORDER:
+            group = ASSET_GROUPS.get(group_key, {})
+            group_label = group.get("label", group_key)
+            group_keys  = group.get("keys", [])
+
+            rows = []
+            for ak in group_keys:
+                info = all_assets_data.get(ak)
+                if not info:
+                    continue
+                b      = info.get("bias", "N/A")
+                p      = info.get("pattern", "N/A")
+                c      = info.get("confidence", 0.0)
+                close  = info.get("last_close", None)
+                name   = info.get("name", ak)
+                b_icon = BIAS_ICONS.get(b, "⚪")
+                rows.append({
+                    "Ativo":     name,
+                    "Tendência": f"{b_icon} {traduz_sinal(b)}",
+                    "Padrão":    traduz_padrao(p),
+                    "Conf.":     fmt_conf(c),
+                    "Último":    f"{close:.4f}" if close and close < 100 else (f"{close:.2f}" if close else "N/D"),
+                })
+
+            if rows:
+                st.markdown(f"**{group_label}**")
+
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("Dados de ativos não disponíveis. Clique em **Correr Análise** para gerar.")
+
+    st.divider()
+
     # ── Contexto Histórico ────────────────────────────────────────────────
     hist = report.get("historical_context", {})
     hist_available = hist.get("available", False)

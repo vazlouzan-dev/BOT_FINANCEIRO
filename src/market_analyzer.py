@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 import time
 import pytz
-from src.config import ASSETS, CANDLE_CONFIG, TIMEZONES
+from src.config import ASSETS, ASSET_GROUPS, CANDLE_CONFIG, TIMEZONES
 from src.utils import logger, validate_ohlc_data, safe_divide
 
 # Simple in-memory OHLC cache to avoid redundant API calls within the same run
@@ -321,6 +321,179 @@ def calculate_session_bias(session_assets: Dict[str, Dict]) -> Tuple[str, float,
     dominant_pattern = max(set(all_patterns), key=all_patterns.count) if all_patterns else "Mixed"
 
     return (bias, confidence, dominant_pattern)
+
+# ============================================================================
+# PO3 / ADM — POWER OF 3 (ACUMULAÇÃO · MANIPULAÇÃO · DISTRIBUIÇÃO)
+# ============================================================================
+
+def detect_po3_adm(df_1h: pd.DataFrame) -> Tuple[str, float, str]:
+    """
+    Analisa a estrutura Power of 3 (PO3/ADM) usando dados intraday de 1h do dia atual.
+
+    Fases:
+      - Acumulação  : sessão asiática (00:00–08:00 UTC) → define o range de referência
+      - Manipulação : sessão Londres (08:00–13:30 UTC) → falso movimento para varrer stops
+      - Distribuição: direção real após a manipulação → sinal para abertura NY
+
+    Lógica:
+      - London varreu abaixo do mínimo asiático E preço atual subiu → Bullish (manipulação ↓ → distribuição ↑)
+      - London varreu acima do máximo asiático E preço atual desceu → Bearish (manipulação ↑ → distribuição ↓)
+      - Sem manipulação clara → posição do preço dentro do range asiático
+
+    Returns: (fase, confiança, direção)
+    """
+    if df_1h is None or df_1h.empty:
+        return ("Sem Dados", 0.0, "NEUTRAL")
+
+    # Normalizar índice para UTC
+    try:
+        if df_1h.index.tz is None:
+            df_1h = df_1h.copy()
+            df_1h.index = df_1h.index.tz_localize("UTC")
+        else:
+            df_1h = df_1h.copy()
+            df_1h.index = df_1h.index.tz_convert("UTC")
+    except Exception:
+        pass
+
+    from datetime import timezone as _tz
+    today = datetime.now(_tz.utc).date()
+
+    try:
+        today_bars = df_1h[df_1h.index.date == today]
+    except Exception:
+        today_bars = df_1h.tail(20)
+
+    if today_bars.empty:
+        today_bars = df_1h.tail(10)  # fallback: últimas 10 barras
+
+    if today_bars.empty:
+        return ("Sem Dados Hoje", 0.0, "NEUTRAL")
+
+    # Sessão asiática: 00:00–07:59 UTC
+    asia_bars   = today_bars[today_bars.index.hour < 8]
+    # Sessão Londres: 08:00–13:29 UTC
+    london_bars = today_bars[(today_bars.index.hour >= 8) & (today_bars.index.hour < 14)]
+
+    current_price = float(today_bars["Close"].iloc[-1])
+    day_open      = float(today_bars["Open"].iloc[0])
+
+    # Range de acumulação (asiático ou, se vazio, primeira metade do dia)
+    if not asia_bars.empty:
+        asia_high = float(asia_bars["High"].max())
+        asia_low  = float(asia_bars["Low"].min())
+    else:
+        mid = max(len(today_bars) // 2, 1)
+        asia_high = float(today_bars["High"].iloc[:mid].max())
+        asia_low  = float(today_bars["Low"].iloc[:mid].min())
+
+    asia_range = asia_high - asia_low
+    if asia_range <= 0:
+        asia_range = abs(current_price * 0.001)  # evitar divisão por zero
+
+    # Detetar manipulação de Londres
+    london_swept_high = False  # London foi acima do máximo asiático
+    london_swept_low  = False  # London foi abaixo do mínimo asiático
+    if not london_bars.empty:
+        if float(london_bars["High"].max()) > asia_high:
+            london_swept_high = True
+        if float(london_bars["Low"].min()) < asia_low:
+            london_swept_low = True
+
+    # Posição atual dentro do range asiático (0 = fundo, 1 = topo)
+    position_pct = (current_price - asia_low) / asia_range
+
+    # ── Distribuição após manipulação (sinal mais forte) ──────────────────
+    # Manipulação bearish (swept high) → distribuição bearish esperada
+    if london_swept_high and not london_swept_low:
+        if current_price < asia_high:
+            conf = 0.80 if position_pct < 0.45 else 0.65
+            return ("Distribuição Bearish (Pós-Manipulação Alta)", conf, "BEARISH")
+
+    # Manipulação bullish (swept low) → distribuição bullish esperada
+    if london_swept_low and not london_swept_high:
+        if current_price > asia_low:
+            conf = 0.80 if position_pct > 0.55 else 0.65
+            return ("Distribuição Bullish (Pós-Manipulação Baixa)", conf, "BULLISH")
+
+    # Dupla manipulação (swept ambos os lados) → indecisão
+    if london_swept_high and london_swept_low:
+        return ("Manipulação dos Dois Lados — Indecisão", 0.40, "NEUTRAL")
+
+    # ── Sem manipulação clara: posição no range ───────────────────────────
+    if position_pct > 0.70:
+        return ("Distribuição Bullish (Topo do Range)", 0.55, "BULLISH")
+    elif position_pct < 0.30:
+        return ("Distribuição Bearish (Fundo do Range)", 0.55, "BEARISH")
+    else:
+        return ("Acumulação / Indecisão (Meio do Range)", 0.40, "NEUTRAL")
+
+
+def analyze_po3_structure(primary_ticker: str = "ES=F") -> Dict:
+    """
+    Analisa a estrutura PO3/ADM do dia usando o ativo principal (ES=F ou SPY como fallback).
+
+    Returns dict:
+      - bias       : "BULLISH" | "BEARISH" | "NEUTRAL"
+      - confidence : 0.0–1.0
+      - phase      : descrição da fase PO3 detectada
+      - ticker_used: ticker efetivamente usado
+    """
+    df_1h = fetch_ohlc_data(primary_ticker, period="2d", interval="1h")
+
+    ticker_used = primary_ticker
+    if df_1h is None or df_1h.empty:
+        logger.warning(f"PO3: sem dados para {primary_ticker}, a tentar SPY...")
+        df_1h = fetch_ohlc_data("SPY", period="2d", interval="1h")
+        ticker_used = "SPY"
+
+    if df_1h is None or df_1h.empty:
+        return {"bias": "NEUTRAL", "confidence": 0.0, "phase": "Sem Dados", "ticker_used": ticker_used}
+
+    phase, confidence, direction = detect_po3_adm(df_1h)
+    logger.info(f"PO3 [{ticker_used}]: {direction} | {phase} ({confidence:.0%})")
+
+    return {
+        "bias":        direction,
+        "confidence":  confidence,
+        "phase":       phase,
+        "ticker_used": ticker_used,
+    }
+
+
+# ============================================================================
+# ALL ASSETS — análise completa para dashboard por classe de ativo
+# ============================================================================
+
+def analyze_all_assets() -> Dict[str, Dict]:
+    """
+    Busca e analisa TODOS os ativos definidos em ASSETS (candlestick + preço).
+    Usado exclusivamente para a tabela de ativos por classe no dashboard.
+
+    Returns dict keyed por asset_key com:
+      name, bias, pattern, confidence, last_close, type
+    """
+    results: Dict[str, Dict] = {}
+
+    for asset_key, asset_info in ASSETS.items():
+        df = fetch_asset_ohlc(asset_key)
+        if df is not None and len(df) >= 2:
+            pattern, confidence, direction = analyze_candlestick_pattern(df)
+            last_close = float(df["Close"].iloc[-1])
+            results[asset_key] = {
+                "name":       asset_info.get("name", asset_key),
+                "bias":       direction,
+                "pattern":    pattern,
+                "confidence": confidence,
+                "last_close": last_close,
+                "type":       asset_info.get("type", ""),
+            }
+            logger.debug(f"AllAssets | {asset_key}: {direction} ({pattern})")
+        else:
+            logger.debug(f"AllAssets | {asset_key}: sem dados")
+
+    return results
+
 
 # ============================================================================
 # TESTING / MOCK DATA

@@ -27,27 +27,57 @@ REGIME_LABELS = {
 }
 
 # ============================================================================
-# ASSETS TO MONITOR (9 assets across stocks, forex, commodities, crypto, bonds)
+# ASSETS TO MONITOR (14 assets across futures, forex, commodities, crypto, bonds)
 # ============================================================================
 ASSETS = {
-    # US Indices (Stocks)
-    "SPY": {"ticker": "SPY", "name": "S&P 500", "type": "stock", "zone": "ny"},
-    "QQQ": {"ticker": "QQQ", "name": "NASDAQ-100", "type": "stock", "zone": "ny"},
-    "DIA": {"ticker": "DIA", "name": "Dow Jones", "type": "stock", "zone": "ny"},
-    
+    # US Index Futures (traded ~23h/day — melhor proxy intraday para PO3)
+    "ES":  {"ticker": "ES=F",    "name": "S&P 500 Futuros",  "type": "futures", "zone": "ny"},
+    "NQ":  {"ticker": "NQ=F",    "name": "NASDAQ Futuros",   "type": "futures", "zone": "ny"},
+
+    # US Indices ETF (sessão NY — usados para análise de sessão)
+    "SPY": {"ticker": "SPY",     "name": "S&P 500 (SPY)",    "type": "stock",   "zone": "ny"},
+    "QQQ": {"ticker": "QQQ",     "name": "NASDAQ-100 (QQQ)", "type": "stock",   "zone": "ny"},
+
     # Forex Pairs
     "EURUSD": {"ticker": "EURUSD=X", "name": "EUR/USD", "type": "forex", "zone": "london"},
     "GBPUSD": {"ticker": "GBPUSD=X", "name": "GBP/USD", "type": "forex", "zone": "london"},
-    
-    # Commodities
-    "GOLD": {"ticker": "GC=F", "name": "XAU/USD (Gold)", "type": "commodity", "zone": "global"},
-    "DXY": {"ticker": "DX-Y.NYB", "name": "US Dollar Index", "type": "commodity", "zone": "global"},
-    
+
+    # Metais + DXY
+    "GOLD": {"ticker": "GC=F",      "name": "XAU/USD (Ouro)", "type": "commodity", "zone": "global"},
+    "DXY":  {"ticker": "DX-Y.NYB",  "name": "DXY (Dólar)",   "type": "commodity", "zone": "global"},
+
     # Crypto
     "BTC": {"ticker": "BTC-USD", "name": "Bitcoin", "type": "crypto", "zone": "global"},
-    
-    # US Bonds (Interest rates)
-    "UST10Y": {"ticker": "^TNX", "name": "US Treasury 10Y Yield", "type": "bond", "zone": "global"},
+
+    # US Bonds / Yields
+    # Nota: ^IRX = T-Bill 3M (proxy taxa curta/2Y); ^TNX = 10Y; ^TYX = 30Y
+    # TLT = ETF 20Y+ (preço move inversamente ao yield — bullish TLT = yields a cair)
+    "UST2Y":  {"ticker": "^IRX",    "name": "T-Bill 3M (~2Y)", "type": "bond", "zone": "global"},
+    "UST10Y": {"ticker": "^TNX",    "name": "Yield 10Y",       "type": "bond", "zone": "global"},
+    "UST20Y": {"ticker": "TLT",     "name": "Bond 20Y+ (ETF)", "type": "bond", "zone": "global"},
+    "UST30Y": {"ticker": "^TYX",    "name": "Yield 30Y",       "type": "bond", "zone": "global"},
+}
+
+# ============================================================================
+# ASSET GROUPS — agrupamento para dashboard por classe de ativo
+# ============================================================================
+ASSET_GROUPS = {
+    "indices": {
+        "label": "📈 SP500 + NASDAQ (Futuros)",
+        "keys":  ["ES", "NQ"],
+    },
+    "forex": {
+        "label": "💱 Forex + Metais + DXY",
+        "keys":  ["EURUSD", "GBPUSD", "GOLD", "DXY"],
+    },
+    "crypto": {
+        "label": "₿ Crypto",
+        "keys":  ["BTC"],
+    },
+    "bonds": {
+        "label": "🏦 Bonds (2Y / 10Y / 20Y / 30Y)",
+        "keys":  ["UST2Y", "UST10Y", "UST20Y", "UST30Y"],
+    },
 }
 
 # ============================================================================

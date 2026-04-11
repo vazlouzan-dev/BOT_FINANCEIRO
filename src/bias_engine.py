@@ -14,7 +14,10 @@ from typing import Dict, Tuple, List
 from datetime import datetime, timezone
 import pytz
 from src.config import SESSION_WEIGHTS, CONFIDENCE_THRESHOLD, MACRO_EVENT_WEIGHTS, NY_SCORE_THRESHOLD
-from src.market_analyzer import analyze_session_assets, calculate_session_bias
+from src.market_analyzer import (
+    analyze_session_assets, calculate_session_bias,
+    analyze_po3_structure, analyze_all_assets,
+)
 from src.macro_calendar import fetch_macro_calendar, calculate_macro_sentiment
 from src.regime_detector import detect_market_regime
 from src.news_analyzer import fetch_all_news, calculate_news_sentiment
@@ -27,6 +30,19 @@ from src.utils import logger
 # History layer has fixed 15% when data is available (≥5 events),
 # else redistributed to macro + sessions.
 # ============================================================================
+# ============================================================================
+# PESOS PARA DIAS SEM MACRO (PO3/ADM + Notícias)
+# Regra do utilizador:
+#   Notícias impactantes (high/medium) → notícias 65%, candle PO3 35%
+#   Sem notícias impactantes           → notícias 15%, candle PO3 85%
+# ============================================================================
+_NO_MACRO_WEIGHTS = {
+    "high":   {"news": 0.65, "candle": 0.35},
+    "medium": {"news": 0.65, "candle": 0.35},
+    "low":    {"news": 0.15, "candle": 0.85},
+    "none":   {"news": 0.15, "candle": 0.85},
+}
+
 _DYNAMIC_WEIGHTS = {
     #                sessions  macro  news   history
     # Sessions = Ásia (5%) + Londres (25%) = 30% fixo
@@ -41,6 +57,25 @@ _DYNAMIC_WEIGHTS = {
     "low":         {"sessions": 0.27, "macro": 0.58, "news": 0.15, "history": 0.00},
     "none":        {"sessions": 0.30, "macro": 0.65, "news": 0.05, "history": 0.00},
 }
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+def _has_macro_today(macro_calendar: Dict) -> bool:
+    """
+    Verifica se existem eventos macroeconómicos de ALTO impacto agendados para HOJE.
+    Usado para ativar o modo "sem macro" (PO3 + notícias) vs. modo normal.
+    """
+    from datetime import date
+    today_str = date.today().strftime("%Y-%m-%d")
+    for event in macro_calendar.get("upcoming_events", []):
+        event_date   = event.get("date", "")
+        event_impact = event.get("impact", "").lower()
+        if event_date == today_str and event_impact in ("high", "alto"):
+            return True
+    return False
+
 
 # ============================================================================
 # BIAS CALCULATION ENGINE
@@ -169,24 +204,38 @@ def calculate_ny_bias() -> Dict:
         logger.info("[HISTORY] No historical data available — run with --build-history first")
 
     # ========================================================================
-    # STEP 7 — DYNAMIC WEIGHTS + FINAL CALCULATION
-    # News impact level determines how much each layer contributes.
-    # No news → macro dominates. High-impact news → news can override macro.
+    # STEP 7 — DETETAR SE HÁ MACRO HOJE
+    # Se não houver eventos de alto impacto hoje → modo PO3/ADM + Notícias
+    # Se houver macro hoje → modo normal (Sessões + Macro + Notícias + Histórico)
     # ========================================================================
-    logger.info(f"\n[FINAL DECISION] Computing NY opening bias (9:30-10:30)...")
-
-    hist_available = hist_context.get("available", False)
-    weight_key     = f"{news_impact}_hist" if hist_available else news_impact
-    weights        = _DYNAMIC_WEIGHTS.get(weight_key, _DYNAMIC_WEIGHTS[news_impact])
-    w_sessions     = weights["sessions"]
-    w_macro        = weights["macro"]
-    w_news         = weights["news"]
-    w_history      = weights["history"]
+    has_macro_today = _has_macro_today(macro_calendar)
+    report["has_macro_today"] = has_macro_today
 
     logger.info(
-        f"  Weights -> Sessions: {w_sessions:.0%} | Macro: {w_macro:.0%} | "
-        f"Noticias: {w_news:.0%} | Historico: {w_history:.0%}"
+        f"\n[MODO] {'⚠️  MACRO HOJE — modo normal (Sessões+Macro+Notícias)' if has_macro_today else '📊 SEM MACRO HOJE — modo PO3/ADM + Notícias'}"
     )
+
+    # ========================================================================
+    # STEP 8 — PO3/ADM (sempre calculado; usado como driver principal sem macro)
+    # ========================================================================
+    logger.info(f"\n[PO3/ADM] Analisando estrutura da candle em formação (ES=F)...")
+    po3_result = analyze_po3_structure(primary_ticker="ES=F")
+    report["po3_structure"] = po3_result
+    logger.info(
+        f"PO3 Fase: {po3_result['phase']} | "
+        f"Direção: {po3_result['bias']} ({po3_result['confidence']:.0%})"
+    )
+
+    # ========================================================================
+    # STEP 9 — ALL ASSETS (para tabela por classe de ativo no dashboard)
+    # ========================================================================
+    logger.info(f"\n[ALL ASSETS] Analisando todos os ativos para dashboard...")
+    report["all_assets"] = analyze_all_assets()
+
+    # ========================================================================
+    # STEP 10 — PESOS + CÁLCULO FINAL
+    # ========================================================================
+    logger.info(f"\n[FINAL DECISION] Computing NY opening bias (9:30-10:30)...")
 
     def _to_score(sentiment: str, confidence: float) -> float:
         if sentiment == "BULLISH":
@@ -195,27 +244,78 @@ def calculate_ny_bias() -> Dict:
             return -confidence
         return 0.0
 
-    # Sessions layer: Asia + London weighted internally (30/40 split)
-    asia_w   = SESSION_WEIGHTS["asia"]   / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
-    london_w = SESSION_WEIGHTS["london"] / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
-    session_score = (
-        _to_score(asia_bias, asia_confidence)    * asia_w +
-        _to_score(london_bias, london_confidence) * london_w
-    )
+    news_score = _to_score(news_bias, news_conf)
+    po3_score  = _to_score(po3_result["bias"], po3_result["confidence"])
 
-    macro_score   = _to_score(macro_sentiment, macro_confidence)
-    news_score    = _to_score(news_bias, news_conf)
-    history_score = _to_score(
-        hist_context.get("overall_bias", "NEUTRAL"),
-        hist_context.get("overall_conf", 0.0),
-    ) if hist_available else 0.0
+    if not has_macro_today:
+        # ── MODO SEM MACRO: PO3/ADM + Notícias ───────────────────────────
+        nm_weights = _NO_MACRO_WEIGHTS.get(news_impact, _NO_MACRO_WEIGHTS["none"])
+        w_news     = nm_weights["news"]
+        w_candle   = nm_weights["candle"]
 
-    ny_score = (
-        session_score  * w_sessions +
-        macro_score    * w_macro +
-        news_score     * w_news +
-        history_score  * w_history
-    )
+        ny_score = news_score * w_news + po3_score * w_candle
+
+        weights = {
+            "sessions": 0.0,
+            "macro":    0.0,
+            "news":     w_news,
+            "candle":   w_candle,
+            "history":  0.0,
+        }
+        logger.info(
+            f"  [SEM MACRO] Notícias: {w_news:.0%} | PO3/Candle: {w_candle:.0%} "
+            f"(impacto notícias={news_impact})"
+        )
+
+        hist_available = hist_context.get("available", False)
+        key_drivers = _explain_bias_no_macro(
+            po3_result, news_bias, news_conf, news_impact,
+            ny_score, regime, volatility, nm_weights,
+        )
+
+    else:
+        # ── MODO NORMAL: Sessões + Macro + Notícias + Histórico ───────────
+        hist_available = hist_context.get("available", False)
+        weight_key     = f"{news_impact}_hist" if hist_available else news_impact
+        weights        = _DYNAMIC_WEIGHTS.get(weight_key, _DYNAMIC_WEIGHTS[news_impact])
+        w_sessions     = weights["sessions"]
+        w_macro        = weights["macro"]
+        w_news         = weights["news"]
+        w_history      = weights["history"]
+
+        logger.info(
+            f"  Weights -> Sessions: {w_sessions:.0%} | Macro: {w_macro:.0%} | "
+            f"Noticias: {w_news:.0%} | Historico: {w_history:.0%}"
+        )
+
+        asia_w   = SESSION_WEIGHTS["asia"]   / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
+        london_w = SESSION_WEIGHTS["london"] / (SESSION_WEIGHTS["asia"] + SESSION_WEIGHTS["london"])
+        session_score = (
+            _to_score(asia_bias, asia_confidence)     * asia_w +
+            _to_score(london_bias, london_confidence) * london_w
+        )
+        macro_score   = _to_score(macro_sentiment, macro_confidence)
+        history_score = _to_score(
+            hist_context.get("overall_bias", "NEUTRAL"),
+            hist_context.get("overall_conf", 0.0),
+        ) if hist_available else 0.0
+
+        ny_score = (
+            session_score  * w_sessions +
+            macro_score    * w_macro +
+            news_score     * w_news +
+            history_score  * w_history
+        )
+
+        key_drivers = _explain_bias(
+            asia_bias, asia_confidence,
+            london_bias, london_confidence,
+            macro_sentiment, macro_confidence,
+            news_bias, news_conf, news_impact,
+            hist_context,
+            "BULLISH" if ny_score > 0 else "BEARISH" if ny_score < 0 else "NEUTRAL",
+            regime, volatility, weights,
+        )
 
     if ny_score > NY_SCORE_THRESHOLD:
         ny_signal     = "BULLISH"
@@ -228,15 +328,6 @@ def calculate_ny_bias() -> Dict:
         ny_confidence = 0.5
 
     is_valid = ny_confidence >= CONFIDENCE_THRESHOLD
-
-    key_drivers = _explain_bias(
-        asia_bias, asia_confidence,
-        london_bias, london_confidence,
-        macro_sentiment, macro_confidence,
-        news_bias, news_conf, news_impact,
-        hist_context,
-        ny_signal, regime, volatility, weights,
-    )
 
     report["ny_bias"] = {
         "signal":               ny_signal,
@@ -259,6 +350,79 @@ def calculate_ny_bias() -> Dict:
         logger.info(f"  | {driver}")
 
     return report
+
+# ============================================================================
+# EXPLAIN BIAS — MODO SEM MACRO (PO3 + Notícias)
+# ============================================================================
+
+def _explain_bias_no_macro(
+    po3_result:   Dict,
+    news_bias:    str,  news_conf:   float, news_impact: str,
+    ny_score:     float,
+    regime:       str   = "neutral",
+    volatility:   str   = "BAIXA",
+    weights:      Dict  = None,
+) -> List[str]:
+    """Explica o bias para dias sem eventos macro de alto impacto."""
+    from src.config import REGIME_LABELS
+    if weights is None:
+        weights = {"news": 0.15, "candle": 0.85}
+
+    drivers = []
+    regime_label = REGIME_LABELS.get(regime, regime)
+
+    drivers.append(f"* Regime de mercado: {regime_label}")
+    drivers.append(f"* Volatilidade esperada: {volatility}")
+    drivers.append("* Modo ativo: SEM MACRO — orientação via PO3/ADM + Notícias")
+    drivers.append(
+        f"* Pesos: PO3/Candle {weights['candle']:.0%} | Notícias {weights['news']:.0%}"
+    )
+
+    # PO3
+    po3_bias  = po3_result.get("bias", "NEUTRAL")
+    po3_conf  = po3_result.get("confidence", 0.0)
+    po3_phase = po3_result.get("phase", "—")
+    po3_ticker = po3_result.get("ticker_used", "ES=F")
+    if po3_bias == "BULLISH":
+        drivers.append(f"* PO3/ADM [{po3_ticker}]: {po3_phase} ({po3_conf:.0%}) — distribuição bullish")
+    elif po3_bias == "BEARISH":
+        drivers.append(f"* PO3/ADM [{po3_ticker}]: {po3_phase} ({po3_conf:.0%}) — distribuição bearish")
+    else:
+        drivers.append(f"* PO3/ADM [{po3_ticker}]: {po3_phase} ({po3_conf:.0%}) — acumulação/indecisão")
+
+    # Notícias
+    impact_labels = {
+        "high":   "ALTO IMPACTO — notícias dominam o sinal",
+        "medium": "impacto médio",
+        "low":    "impacto reduzido",
+        "none":   "sem notícias relevantes — estrutura da candle domina",
+    }
+    impact_str = impact_labels.get(news_impact, news_impact)
+    if news_bias == "BULLISH":
+        drivers.append(f"* Notícias SPY/QQQ/Mag7: Sentimento positivo ({news_conf:.0%}) | {impact_str}")
+    elif news_bias == "BEARISH":
+        drivers.append(f"* Notícias SPY/QQQ/Mag7: Sentimento negativo ({news_conf:.0%}) | {impact_str}")
+    else:
+        drivers.append(f"* Notícias SPY/QQQ/Mag7: Neutro ({news_conf:.0%}) | {impact_str}")
+
+    # Regime + taxas de juro
+    if regime == "inflation_fight":
+        drivers.append("* Sentimento: Fed em modo restritivo — subidas de taxas penalizam valuations")
+    elif regime == "recession_fear":
+        drivers.append("* Sentimento: Receio de recessão — Fed pode cortar taxas; risco de queda nos lucros")
+    else:
+        drivers.append("* Sentimento: Neutro — sem pressão clara de inflação ou recessão")
+
+    # Conclusão
+    if ny_score > NY_SCORE_THRESHOLD:
+        drivers.append("* Conclusão: PO3 + Notícias apontam ALTA para abertura NY (9:30–10:30)")
+    elif ny_score < -NY_SCORE_THRESHOLD:
+        drivers.append("* Conclusão: PO3 + Notícias apontam BAIXA para abertura NY (9:30–10:30)")
+    else:
+        drivers.append("* Conclusão: Sinais mistos (sem macro) — cautela em trades direcionais")
+
+    return drivers
+
 
 # ============================================================================
 # EXPLAIN BIAS (KEY DRIVERS)
