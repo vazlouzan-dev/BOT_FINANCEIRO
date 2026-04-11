@@ -280,91 +280,45 @@ with tab_dashboard:
         st.dataframe(ind_rows, use_container_width=True, hide_index=True)
         st.caption(f"Score total: {regime_score:+d}  |  ≥+2 = Combate Inflação  |  ≤-2 = Receio Recessão  |  ★ = indicador preferido da Fed")
 
-    # ── Sessões e Macro ───────────────────────────────────────────────────
-    col_asia, col_london, col_macro = st.columns(3)
+    # ── Eventos Macroeconómicos ───────────────────────────────────────────
+    macro_sinal    = macro.get("sentiment", "N/A")
+    macro_conf     = macro.get("confidence", 0.0)
+    macro_color    = SIGNAL_COLORS.get(macro_sinal, "#888")
+    macro_icon     = BIAS_ICONS.get(macro_sinal, "⚪")
+    macro_label    = traduz_sinal(macro_sinal)
+    upcoming       = macro.get("upcoming_events", [])
+    regime_applied = macro.get("regime_applied", "neutral")
 
-    def render_sessao(col, titulo, session_data):
-        bias        = session_data.get("overall_bias", "N/A")
-        conf        = session_data.get("confidence", 0.0)
-        pattern     = session_data.get("dominant_pattern", "N/A")
-        assets      = session_data.get("assets", {})
-        bias_color  = SIGNAL_COLORS.get(bias, "#888")
-        bias_icon   = BIAS_ICONS.get(bias, "⚪")
-        bias_label  = traduz_sinal(bias)
+    st.markdown("**📰 Eventos Macroeconómicos**")
+    st.markdown(
+        f"<span style='color:{macro_color}; font-size:1.3rem; font-weight:700;'>"
+        f"{macro_icon} {macro_label}</span> &nbsp; "
+        f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(macro_conf)} de confiança</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Interpretados com regime: {regime_applied}")
 
-        with col:
-            st.markdown(f"**{titulo}**")
+    if upcoming:
+        for ev in upcoming[:8]:
+            impact_en  = ev.get("impact", "")
+            impact_pt  = traduz_impacto(impact_en)
+            tag_class  = {"Alto": "tag-alto", "Médio": "tag-medio"}.get(impact_pt, "tag-baixo")
+            fc         = ev.get("forecast", "N/D")
+            prev       = ev.get("previous", "N/D")
+            actual_v   = ev.get("actual", "")
+            fc_str     = f"Prev: {fc} / Ant: {prev}" if fc not in ("N/A", "N/D") else ""
+            actual_str = f" | Real: <b>{actual_v}</b>" if actual_v not in ("N/A", "N/D", None, "") else ""
             st.markdown(
-                f"<span style='color:{bias_color}; font-size:1.3rem; font-weight:700;'>"
-                f"{bias_icon} {bias_label}</span> &nbsp; "
-                f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(conf)} de confiança</span>",
+                f"<div class='driver-line'>"
+                f"<span class='{tag_class}'>{impact_pt}</span> "
+                f"<b>{ev.get('event','')[:38]}</b><br>"
+                f"<span style='color:#888; font-size:0.8rem;'>"
+                f"{ev.get('date','')}&nbsp;&nbsp;{fc_str}{actual_str}</span>"
+                f"</div>",
                 unsafe_allow_html=True,
             )
-            st.caption(f"Padrão dominante: {traduz_padrao(pattern)}")
-
-            if assets:
-                rows = []
-                for key, info in assets.items():
-                    b      = info.get("bias", "N/A")
-                    p      = info.get("pattern", "N/A")
-                    c      = info.get("confidence", 0.0)
-                    close  = info.get("last_close", None)
-                    name   = info.get("name", key)
-                    b_icon = BIAS_ICONS.get(b, "⚪")
-                    rows.append({
-                        "Ativo":     name,
-                        "Tendência": f"{b_icon} {traduz_sinal(b)}",
-                        "Padrão":    traduz_padrao(p),
-                        "Conf.":     fmt_conf(c),
-                        "Fecho":     f"{close:.2f}" if close else "N/D",
-                    })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Sem dados de ativos disponíveis.")
-
-    render_sessao(col_asia,   "🌏 Sessão Ásia",    asia)
-    render_sessao(col_london, "🇬🇧 Sessão Londres", london)
-
-    # Coluna Macro
-    with col_macro:
-        macro_sinal = macro.get("sentiment", "N/A")
-        macro_conf  = macro.get("confidence", 0.0)
-        macro_color = SIGNAL_COLORS.get(macro_sinal, "#888")
-        macro_icon  = BIAS_ICONS.get(macro_sinal, "⚪")
-        macro_label = traduz_sinal(macro_sinal)
-        upcoming    = macro.get("upcoming_events", [])
-        regime_applied = macro.get("regime_applied", "neutral")
-
-        st.markdown("**📰 Eventos Macroeconómicos**")
-        st.markdown(
-            f"<span style='color:{macro_color}; font-size:1.3rem; font-weight:700;'>"
-            f"{macro_icon} {macro_label}</span> &nbsp; "
-            f"<span style='color:#aaa; font-size:0.9rem;'>{fmt_conf(macro_conf)} de confiança</span>",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"Interpretados com regime: {regime_applied}")
-
-        if upcoming:
-            for ev in upcoming[:8]:
-                impact_en  = ev.get("impact", "")
-                impact_pt  = traduz_impacto(impact_en)
-                tag_class  = {"Alto": "tag-alto", "Médio": "tag-medio"}.get(impact_pt, "tag-baixo")
-                fc         = ev.get("forecast", "N/D")
-                prev       = ev.get("previous", "N/D")
-                actual_v   = ev.get("actual", "")
-                fc_str     = f"Prev: {fc} / Ant: {prev}" if fc not in ("N/A", "N/D") else ""
-                actual_str = f" | Real: <b>{actual_v}</b>" if actual_v not in ("N/A", "N/D", None, "") else ""
-                st.markdown(
-                    f"<div class='driver-line'>"
-                    f"<span class='{tag_class}'>{impact_pt}</span> "
-                    f"<b>{ev.get('event','')[:38]}</b><br>"
-                    f"<span style='color:#888; font-size:0.8rem;'>"
-                    f"{ev.get('date','')}&nbsp;&nbsp;{fc_str}{actual_str}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.caption("Sem eventos próximos disponíveis.")
+    else:
+        st.caption("Sem eventos próximos disponíveis.")
 
     st.divider()
 
