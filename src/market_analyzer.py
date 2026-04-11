@@ -9,12 +9,62 @@ from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 import time
 import pytz
-from src.config import ASSETS, ASSET_GROUPS, CANDLE_CONFIG, TIMEZONES
+import requests
+from src.config import ASSETS, ASSET_GROUPS, CANDLE_CONFIG, TIMEZONES, FINNHUB_API_KEY, FINNHUB_SYMBOL_MAP
 from src.utils import logger, validate_ohlc_data, safe_divide
 
 # Simple in-memory OHLC cache to avoid redundant API calls within the same run
 _ohlc_cache: Dict[str, Tuple[pd.DataFrame, float]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+
+# Cache para preços Finnhub (TTL curto — 60 s para aproveitar o real-time)
+_finnhub_cache: Dict[str, Tuple[float, float]] = {}
+_FINNHUB_TTL = 60  # segundos
+
+
+# ============================================================================
+# FINNHUB REAL-TIME QUOTES
+# ============================================================================
+
+def fetch_finnhub_quote(asset_key: str) -> Optional[float]:
+    """
+    Obtém o preço atual de um ativo via Finnhub /quote (real-time, free tier).
+    Retorna o preço atual (campo 'c') ou None se não disponível.
+
+    Cache interno de 60 segundos para não exceder os rate limits.
+    """
+    if not FINNHUB_API_KEY:
+        return None
+
+    finnhub_symbol = FINNHUB_SYMBOL_MAP.get(asset_key)
+    if not finnhub_symbol:
+        return None  # ativo sem mapeamento Finnhub — usar yfinance
+
+    now = time.monotonic()
+    if asset_key in _finnhub_cache:
+        cached_price, cached_at = _finnhub_cache[asset_key]
+        if now - cached_at < _FINNHUB_TTL:
+            logger.debug(f"Finnhub cache hit: {asset_key} = {cached_price}")
+            return cached_price
+
+    try:
+        url    = "https://finnhub.io/api/v1/quote"
+        params = {"symbol": finnhub_symbol, "token": FINNHUB_API_KEY}
+        resp   = requests.get(url, params=params, timeout=5)
+        resp.raise_for_status()
+        data   = resp.json()
+
+        price = data.get("c")  # current price
+        if price and price > 0:
+            _finnhub_cache[asset_key] = (float(price), now)
+            logger.debug(f"Finnhub real-time: {asset_key} ({finnhub_symbol}) = {price}")
+            return float(price)
+
+        logger.warning(f"Finnhub /quote: preço inválido para {finnhub_symbol}: {data}")
+    except Exception as e:
+        logger.debug(f"Finnhub /quote erro ({asset_key}): {e}")
+
+    return None
 
 # ============================================================================
 # CANDLESTICK PATTERN DETECTION
@@ -468,10 +518,11 @@ def analyze_po3_structure(primary_ticker: str = "ES=F") -> Dict:
 def analyze_all_assets() -> Dict[str, Dict]:
     """
     Busca e analisa TODOS os ativos definidos em ASSETS (candlestick + preço).
-    Usado exclusivamente para a tabela de ativos por classe no dashboard.
+    Preço atual: Finnhub real-time quando disponível, yfinance como fallback.
+    Padrões de candlestick: sempre via yfinance (precisa de OHLC histórico).
 
     Returns dict keyed por asset_key com:
-      name, bias, pattern, confidence, last_close, type
+      name, bias, pattern, confidence, last_close, price_source, type
     """
     results: Dict[str, Dict] = {}
 
@@ -479,16 +530,30 @@ def analyze_all_assets() -> Dict[str, Dict]:
         df = fetch_asset_ohlc(asset_key)
         if df is not None and len(df) >= 2:
             pattern, confidence, direction = analyze_candlestick_pattern(df)
-            last_close = float(df["Close"].iloc[-1])
+            yf_price = float(df["Close"].iloc[-1])
+
+            # Tentar preço real-time via Finnhub
+            rt_price = fetch_finnhub_quote(asset_key)
+            if rt_price:
+                last_close   = rt_price
+                price_source = "finnhub"
+            else:
+                last_close   = yf_price
+                price_source = "yfinance"
+
             results[asset_key] = {
-                "name":       asset_info.get("name", asset_key),
-                "bias":       direction,
-                "pattern":    pattern,
-                "confidence": confidence,
-                "last_close": last_close,
-                "type":       asset_info.get("type", ""),
+                "name":         asset_info.get("name", asset_key),
+                "bias":         direction,
+                "pattern":      pattern,
+                "confidence":   confidence,
+                "last_close":   last_close,
+                "price_source": price_source,
+                "type":         asset_info.get("type", ""),
             }
-            logger.debug(f"AllAssets | {asset_key}: {direction} ({pattern})")
+            logger.debug(
+                f"AllAssets | {asset_key}: {direction} ({pattern}) "
+                f"| preço={last_close:.4f} [{price_source}]"
+            )
         else:
             logger.debug(f"AllAssets | {asset_key}: sem dados")
 

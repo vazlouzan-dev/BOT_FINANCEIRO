@@ -59,6 +59,32 @@ ASSETS = {
 }
 
 # ============================================================================
+# FINNHUB REAL-TIME SYMBOL MAP
+# Mapeamento asset_key → símbolo Finnhub para preços em tempo real.
+# Apenas ativos disponíveis no free tier do Finnhub.
+# Forex usa prefixo OANDA; Crypto usa BINANCE; ETFs/Stocks sem prefixo.
+# ============================================================================
+FINNHUB_SYMBOL_MAP = {
+    # ETFs US (real-time no free tier)
+    "SPY":    "SPY",
+    "QQQ":    "QQQ",
+    "UST20Y": "TLT",        # ETF 20Y+
+
+    # Forex via OANDA (real-time no free tier)
+    "EURUSD": "OANDA:EUR_USD",
+    "GBPUSD": "OANDA:GBP_USD",
+    "GOLD":   "OANDA:XAU_USD",
+
+    # Crypto via Binance (real-time no free tier)
+    "BTC":    "BINANCE:BTCUSDT",
+
+    # Futuros e yields não disponíveis no free tier:
+    # ES, NQ → ficam com yfinance (15-min delay)
+    # UST2Y, UST10Y, UST30Y → ficam com yfinance
+    # DXY → ficam com yfinance
+}
+
+# ============================================================================
 # ASSET GROUPS — agrupamento para dashboard por classe de ativo
 # ============================================================================
 ASSET_GROUPS = {
